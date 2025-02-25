@@ -1,13 +1,16 @@
 open Utils
 
 type t =
-  | Var of int
+  | Var of int (* De Bruijn levels, see e.g. https://link.springer.com/chapter/10.1007/3-540-59200-8_65 (also at https://perso.ens-lyon.fr/pierre.lescanne/PUBLICATIONS/level.pdf) *)
   | Const of string
   | Fun of string * t * t
   | App of t list (* FIXME: slow *)
   | Type of Univ.t
   | Pi of string * t * t
   | Let of string * t * t * t
+
+(* Invariant : depth = List.length var *)
+type context = { depth : int; var : (string * t * t option) list; const : (t * t) SMap.t }
 
 type type_error =
   | UnboundVar of int
@@ -20,7 +23,11 @@ type type_error =
 
 exception TypeError of context * type_error
 
-type context = { var : (string * t * t option) list; const : (t * t) SMap.t }
+let mkApp f args =
+  match args, f with
+  | [], f -> f
+  | args, App f -> App (f @ args)
+  | args, f -> App (f :: args)
 
 let rec debug_print e =
   let (+) = fun _ e -> debug_print e in
@@ -34,32 +41,38 @@ let rec debug_print e =
   | App (f :: a) ->
     let (+) = fun _ e -> () ++ "(" + e ++ ")" in
     () ++ "App " + f; List.iter (fun e -> () ++ " " + e) a
-  | Type i -> () ++ if i = 0 then "Prop" else "Type"
-  | _ -> raise (TypeError ({ var = []; const = SMap.empty }, IllFormed e))
+  | Type l ->
+    let pr_atom v i =
+      if v = "" then
+        (if i = 0 then
+          () ++ "Prop"
+        else (() ++ "Type@{"; print_int i ++ "}"))
+      else if i = 0 then () ++ v else (() ++ v ++ "+"; print_int i) in
+    if SMap.cardinal l = 1 then
+      let (v, i) = SMap.choose l in pr_atom v i
+    else (() ++ "Type@{max("; SMap.iter (fun v i -> pr_atom v i ++ ", ") l ++ ")")
+  | _ -> raise (TypeError ({ depth = 0; var = []; const = SMap.empty }, IllFormed e))
 
-(* Replaces every `Var i` in `t` by `f i`, avoiding capture. *)
+(* Replaces every `Var i` in `t` by `f i`, NOT avoiding capture. *)
 let rec subst f t =
-  (* k is the number of abstractions we crossed *)
-  let rec aux k t =
-    match t with
-    | Var i -> if i < k then t else (if k = 0 then f i else subst (fun i -> Var (i+k)) (f (i-k)))
-    | Const _ | Type _ -> t
-    | App l -> App (List.map (subst f) l)
-    | Fun (v, ty, body) -> Fun (v, aux k ty, aux (k+1) body)
-    | Pi (v, ty, body) -> Pi (v, aux k ty, aux (k+1) body)
-    | Let (v, ty, t, body) -> Let (v, aux k ty, aux k t, aux (k+1) body) in
-  aux 0 t
+  match t with
+  | Var i -> f i
+  | Const _ | Type _ -> t
+  | App l -> App (List.map (subst f) l)
+  | Fun (v, ty, body) -> Fun (v, subst f ty, subst f body)
+  | Pi (v, ty, body) -> Pi (v, subst f ty, subst f body)
+  | Let (v, ty, t, body) -> Let (v, subst f ty, subst f t, subst f body)
 
-(* Replaces `Var 0` with `t` and decreases every other De Bruijn index *)
-let subst0 t = subst (fun i -> if i = 0 then t else Var (i-1))
+(* [beta ctx t t'] beta-reduces (\lambda. t') t *)
+let beta ctx t = subst (fun i -> if i = ctx.depth then t else if i < ctx.depth then Var i else Var (i-1))
 
 module Context = struct
   type t = context
 
-  let empty = { var = []; const = SMap.empty }
+  let empty = { depth = 0; var = []; const = SMap.empty }
 
   let find_var ctx i =
-    try List.nth ctx.var i with _ -> raise (TypeError (ctx, UnboundVar i))
+    try List.nth ctx.var (ctx.depth-i-1) with _ -> raise (TypeError (ctx, UnboundVar i))
 
   let find_const ctx c =
     try SMap.find c ctx.const with _ -> raise (TypeError (ctx, UnboundConst c))
@@ -72,31 +85,20 @@ module Context = struct
     | None -> raise (TypeError (ctx, NoBody (Var i)))
     | Some body -> body
 
-  let var_depth ctx = List.length ctx.var
+  let var_depth ctx = ctx.depth
 
-  let get_const_type ctx c = fst (find_const ctx c)
-  let get_const_body ctx c = snd (find_const ctx c)
+  let get_const_type ctx c = subst (fun i -> Var (i + ctx.depth)) (fst (find_const ctx c))
+  let get_const_body ctx c = subst (fun i -> Var (i + ctx.depth)) (snd (find_const ctx c))
 
-  let push_var ctx t = { ctx with
-    var = List.map
-      (fun (v, ty, body) ->
-        (v,
-        subst (fun i -> Var (i+1)) ty,
-        Option.map (subst (fun i -> Var (i+1))) body))
-      (t :: ctx.var) }
+  let push_var ctx t = { ctx with depth = ctx.depth+1;
+    var = t :: ctx.var }
 
   let push_const ctx c t = { ctx with const = SMap.add c t ctx.const }
 
   let pop_var ctx =
     match ctx.var with
     | [] -> ctx (* TOTHINK: should I fail? *)
-    | _ :: var -> { ctx with var =
-      List.map
-      (fun (v, ty, body) ->
-        (v,
-        subst (fun i -> Var (i-1)) ty,
-        Option.map (subst (fun i -> Var (i-1))) body))
-      var }
+    | _ :: var -> { ctx with depth = ctx.depth-1; var }
 
   let rec pp_term ctx t =
     let ( ++ ) = fun _ s -> print_string s in
@@ -132,8 +134,16 @@ module Context = struct
     | App (f :: a) ->
       let (+) = fun _ e -> if atomic e then pp_term ctx e else (() ++ "("; pp_term ctx e ++ ")") in
       () + f; List.iter (fun e -> () ++ " " + e) a
-    | Type i -> () ++ if i = 0 then "Prop" else "Type"
-    | _ -> raise (TypeError ({ var = []; const = SMap.empty }, IllFormed t))
+    | Type l -> let pr_atom v i =
+      if v = "" then
+        (if i = 0 then
+          () ++ "Prop"
+        else (() ++ "Type@{"; print_int i ++ "}"))
+      else if i = 0 then () ++ v else (() ++ v ++ "+"; print_int i) in
+    if SMap.cardinal l = 1 then
+      let (v, i) = SMap.choose l in pr_atom v i
+    else (() ++ "Type@{max("; SMap.iter (fun v i -> pr_atom v i ++ ", ") l ++ ")")
+    | _ -> raise (TypeError (empty, IllFormed t))
 
 
   let print ctx =
@@ -146,12 +156,6 @@ module Context = struct
 end
 
 let print = Context.pp_term
-
-let mkApp f args =
-  match args, f with
-  | [], f -> f
-  | args, App f -> App (f @ args)
-  | args, f -> App (f :: args)
 
 let rec occurs t t' =
   t = t' ||
@@ -178,10 +182,10 @@ let rec whd_all ctx t =
         | l -> App l)
       | _ -> t) (* TOTHINK: Is losing the computation a problem? *)
     | _ -> t)
-  | Let (_, _, t, body) -> whd_all ctx (subst0 t body)
+  | Let (_, _, t, body) -> whd_all ctx (beta ctx t body)
   | App (f :: l) ->
     (match whd_all ctx f, l with
-    | Fun (_, _, body), x :: l -> whd_all ctx (mkApp (subst0 x body) l)
+    | Fun (_, _, body), x :: l -> whd_all ctx (mkApp (beta ctx x body) l)
     | h, _ -> App (h :: l))
   | _ -> raise (TypeError (ctx, IllFormed t))
 
@@ -199,7 +203,7 @@ let rec unify ctx t1 t2 =
     | _ -> failwith "Internal error : head should not by an application." in
   let beta body = function
     | [] -> failwith "Internal error : term should be applied"
-    | x :: args -> behead (subst0 x body) args in
+    | x :: args -> behead (beta ctx x body) args in
   (* unifies t1 and t2 when t2 may reduce *)
   let rec mixed ctx (h1, args1 as t1) (h2, args2) =
     match h1, h2 with
@@ -212,7 +216,7 @@ let rec unify ctx t1 t2 =
       (match h1 with
       | Let (v, ty1, t1, body1) -> unify ctx ty1 ty2 && unify ctx t1 t2 && unify (Context.push_var ctx (v, ty1, None)) body1 body2 && List.for_all2 (unify ctx) args1 args2
       | _ -> false) ||
-      aux ctx t1 (behead (subst0 t2 body2) args2)
+      aux ctx t1 (beta body2 (t2 :: args2))
     | h1, Var i2 ->
       (match h1 with
       | Var i1 -> i1 = i2 && List.for_all2 (unify ctx) args1 args2
@@ -235,33 +239,37 @@ let rec unify ctx t1 t2 =
 let type_of ctx t =
   let rec aux ctx t =
     match t with
-    | Var i -> (try Context.get_var_type ctx i with _ -> raise (TypeError (ctx, UnboundVar (i - Context.var_depth ctx))))
+    | Var i -> (try Context.get_var_type ctx i with _ -> raise (TypeError (ctx, UnboundVar i)))
     | Const v -> (try Context.get_const_type ctx v with _ -> raise (TypeError (ctx, UnboundConst v)))
-    | Type i -> Type (i+1)
+    | Type l -> Type (Univ.shift 1 l)
     | Fun (v, t, body) -> Pi (v, t, aux (Context.push_var ctx (v, t, None)) body)
     | Pi (v, t, body) ->
-      (match aux ctx t with
-      | Type i ->
-        (match aux (Context.push_var ctx (v, t, None)) body with
-        | Type j -> Type (Univ.max i j)
-        | _ -> raise (TypeError (ctx, NotAType body)))
-      | _ -> raise (TypeError (ctx, NotAType t)))
+      let t = whd_all ctx t in
+      let i = match aux ctx t with | Type i -> i | _ -> raise (TypeError (ctx, NotAType t)) in
+      let ctx = Context.push_var ctx (v, t, None) in
+      let body = whd_all ctx body in
+      let j = match aux ctx body with | Type i -> i | _ -> raise (TypeError (ctx, NotAType body)) in
+      Type (Univ.max i j)
     | App (f :: a) ->
       List.fold_left (fun ty t ->
         match whd_all ctx ty with
         | Pi (_, ty, body) ->
-          if unify ctx (aux ctx t) ty then subst0 t body else raise (TypeError (ctx, TypeMismatch (ty, t)))
+          if unify ctx (aux ctx t) ty then beta ctx t body else raise (TypeError (ctx, TypeMismatch (ty, t)))
         | _ -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (aux ctx f) a
-    | Let (v, ty, t, body) -> subst0 ty (aux (Context.push_var ctx (v, ty, Some t)) body)
+    | Let (v, ty, t, body) -> beta ctx ty (aux (Context.push_var ctx (v, ty, Some t)) body)
     | _ -> raise (TypeError (ctx, IllFormed t))
   in aux ctx t
 
-let print_type_error ctx = function
+let print_type_error ?(debug=false) ctx e =
+  let print = if debug then debug_print else print ctx in
+  match e with
   | UnboundVar i -> print_string "Unbound variable "; print_int i; print_string "\n"
   | UnboundConst v -> print_string "Unbound constant "; print_string v ; print_string "\n"
-  | NotAType t -> print ctx t; print_string " is not a type"; print_string "\n"
-  | IllegalApplication t -> print_string "Illegal application in "; print ctx t; print_string "\n"
-  | TypeMismatch (ty, t) -> print_string "Term "; print ctx t; print_string " has type "; print ctx (type_of ctx t); print_string " while it is expected to have type "; print ctx ty; print_string "\n"
-  | IllFormed t -> print ctx t; print_string " is ill-formed"; print_string "\n"
-  | NoBody t -> print ctx t; print_string "has no body"; print_string "\n"
+  | NotAType t -> print t; print_string " has type "; print (type_of ctx t); print_string ", it is not a type"; print_string "\n"
+  | IllegalApplication t -> print_string "Illegal application in "; print t; print_string "\n"
+  | TypeMismatch (ty, t) ->
+    let tyt = try type_of ctx t with e -> if debug then Const "???" else raise e in
+    print_string "Term "; print t; print_string " has type "; print tyt; print_string " while it is expected to have type "; print ty; print_string "\n"
+  | IllFormed t -> print t; print_string " is ill-formed"; print_string "\n"
+  | NoBody t -> print t; print_string "has no body"; print_string "\n"
 

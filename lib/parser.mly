@@ -29,7 +29,7 @@
   | Var _ | Type _ -> t
   | App l -> App (List.map (capture_vars ctx level) l)
   | Const c ->
-    (try Var (level - SMap.find c ctx - 1)
+    (try Var (SMap.find c ctx)
     with _ -> t)
   | Fun (v, t, body) ->
     Fun (v, capture_vars ctx level t, capture_vars (SMap.add v level ctx) (level + 1) body)
@@ -83,6 +83,6 @@ revstermlist:
 
 sterm:
   | VAR { Term.Const $1 }
-  | TYPE { Term.Type 1 }
-  | PROP { Term.Type 0 }
+  | TYPE { Term.Type (SMap.singleton "" 1) }
+  | PROP { Term.Type (SMap.singleton "" 0) }
   | LPAR; term; RPAR { $2 }
