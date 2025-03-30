@@ -63,6 +63,7 @@ type t =
   | Print of term
   | Check of term
   | Define of string * term * term
+  | Whd of term
   | Stop
 
 let eval ctx = function
@@ -83,5 +84,9 @@ let eval ctx = function
     if Term.unify ctx (Term.type_of ctx body) ty 
       then Term.Context.push_const v (ty, body) ctx
     else raise (Term.TypeError (ctx, Term.TypeMismatch (ty, body)))
+  | Whd t ->
+    let () = Printer.pp_term ctx (Term.whd ctx (capture_vars Utils.SMap.empty ctx t)) in
+    let () = print_newline () in
+    ctx
   | Stop -> ctx
 

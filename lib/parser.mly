@@ -4,8 +4,8 @@
 %token LPAR RPAR FUN ARROW
 %token LET IN FORALL TARROW COMMA DOT JOKER COLON COLONEQ
 %token TYPE PROP
-%token IND PIPE MATCH WITH RETURN END MK
-%token PRINT CHECK DEF
+%token IND PIPE MATCH REC WITH RETURN END MK
+%token PRINT CHECK DEF WHD
 
 %nonassoc COMMA
 %nonassoc ARROW
@@ -31,13 +31,14 @@ command:
   | PRINT; term; DOT { Commands.Print $2 }
   | CHECK; term; DOT { Commands.Check $2 }
   | DEF; VAR; COLON; term; COLONEQ; term; DOT { Commands.Define ($2, $4, $6) }
+  | WHD; term; DOT { Commands.Whd $2 }
 
 term:
   | FUN; telescope; ARROW; term { Commands.mkFun $2 $4 }
   | FORALL; telescope; COMMA; term { Commands.mkPi $2 $4 }
   | LET; VAR; COLON; term; COLONEQ; term; IN; term { Commands.Let ($2, $4, $6, $8) }
   | IND; VAR; COLON; term; constructors; END { Commands.Ind ($2, $4, $5) }
-  | MATCH; term; COLON; term; RETURN; term; WITH; constructors; END { Commands.App ((Commands.Case ($4, false)) :: $6 :: $8 @ [$2]) }
+  | MATCH; option(REC); term; COLON; term; RETURN; term; WITH; constructors; END { Commands.App ((Commands.Case ($5, $2 <> None)) :: $7 :: $9 @ [$3]) }
   | term; TARROW; term { Commands.mkPi [("_", $1)] $3 }
   | app { $1 }
 
@@ -54,7 +55,7 @@ constructors:
   
 %inline
 app:
-  | nonempty_list(sterm) { match $1 with | [e] -> e | l -> Commands.App l }
+  | nonempty_list(sterm) { match $1 with | [] -> Commands.App [] | e :: l -> Commands.mkApp e l }
 
 sterm:
   | VAR { Commands.Const $1 }
