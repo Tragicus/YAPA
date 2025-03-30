@@ -1,0 +1,25 @@
+Definition nat : Type :=
+	forall (T : Type), (T -> T) -> T -> T.
+
+Check nat.
+
+Definition zero : nat :=
+	fun (T : Type) (f : T -> T) (x : T) => x.
+
+Check zero.
+
+Definition succn : nat -> nat :=
+	fun (n : nat) (T : Type) (f : T -> T) (x : T) => n T f (f x).
+
+Check succn.
+
+Definition addn : nat -> nat -> nat :=
+	fun (n m : nat) (T : Type) (f : T -> T) (x : T) => n T f (m T f x).
+
+Check addn.
+
+Definition muln : nat -> nat -> nat :=
+	fun (n m : nat) (T : Type) (f : T -> T) (x : T) =>
+	let g : T -> T := m T f in
+	n T g x.
+Print muln.

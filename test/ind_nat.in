@@ -1,0 +1,32 @@
+Definition nat : Type :=
+	ind nat : Type | nat | nat -> nat end.
+
+Print nat.
+
+Definition zero : nat :=
+	nat.mk 0.
+
+Print zero.
+
+Definition succn : nat -> nat :=
+	nat.mk 1.
+
+Print succn.
+
+Definition predn : nat -> nat :=
+	fun (n : nat) => match n : nat return fun (n : nat) => nat with
+	| zero
+	| fun (n : nat) => n
+	end.
+
+Print predn.
+Whd predn (succn (succn zero)).
+
+Definition addn : nat -> nat -> nat :=
+	fun (n : nat) => match rec n : nat return fun (n : nat) => nat -> nat with
+	| fun (m : nat) => m
+	| fun (n : nat) (addn : nat -> nat) (m : nat) => succn (addn m)
+	end.
+
+Print addn.
+Eval addn (succn zero) (succn (succn zero)).
