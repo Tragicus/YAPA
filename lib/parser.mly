@@ -30,7 +30,7 @@ toplevel:
 command:
   | PRINT; term; DOT { Commands.Print $2 }
   | CHECK; term; DOT { Commands.Check $2 }
-  | DEF; VAR; COLON; term; COLONEQ; term; DOT { Commands.Define ($2, $4, $6) }
+  | DEF; VAR; telescope; COLON; term; COLONEQ; term; DOT { Commands.Define ($2, $3, $5, $7) }
   | WHD; term; DOT { Commands.Whd $2 }
   | EVAL; term; DOT { Commands.Eval $2 }
 
