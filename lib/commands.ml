@@ -62,13 +62,14 @@ let rec capture_vars ictx ctx t =
 type t =
   | Print of term
   | Check of term
-  | Define of string * term * term
+  | Define of string * term Term.telescope * term * term
   | Whd of term
   | Eval of term
   | Stop
 
 let eval ctx = function
   | Print (Const c) ->
+    let () = print_string c; print_string " := " in
     let () = Printer.pp_term ctx (Term.Context.get_const_body ctx c) in
     let () = print_newline () in
     ctx
@@ -76,23 +77,27 @@ let eval ctx = function
     failwith "I can only print the body of constants"
   | Check t ->
     let t = capture_vars Utils.SMap.empty ctx t in
+    let () = Printer.pp_term ctx t; print_string " : " in
     let () = Printer.pp_term ctx (Term.type_of ctx t) in
     let () = print_newline () in
     ctx
-  | Define (v, ty, body) ->
-    let ty = capture_vars Utils.SMap.empty ctx ty in
-    let body = capture_vars Utils.SMap.empty ctx body in
+  | Define (v, tele, ty, body) ->
+    let ty = capture_vars Utils.SMap.empty ctx (mkPi tele ty) in
+    let body = capture_vars Utils.SMap.empty ctx (mkFun tele body) in
     if Term.unify ctx (Term.type_of ctx body) ty 
       then Term.Context.push_const v (ty, body) ctx
     else raise (Term.TypeError (ctx, Term.TypeMismatch (ty, body)))
   | Whd t ->
-    let () = Printer.pp_term ctx (Term.whd ctx (capture_vars Utils.SMap.empty ctx t)) in
+    let t = capture_vars Utils.SMap.empty ctx t in
+    let () = print_string "whd "; Printer.pp_term ctx t; print_string " := " in
+    let () = Printer.pp_term ctx (Term.whd ctx t) in
     let () = print_newline () in
     ctx
   | Eval t ->
-    let () = Printer.pp_term ctx (Term.eval ctx (capture_vars Utils.SMap.empty ctx t)) in
+    let t = capture_vars Utils.SMap.empty ctx t in
+    let () = print_string "eval "; Printer.pp_term ctx t; print_string " := " in
+    let () = Printer.pp_term ctx (Term.eval ctx t) in
     let () = print_newline () in
     ctx
-
   | Stop -> ctx
 
