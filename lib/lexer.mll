@@ -16,6 +16,13 @@ rule token = parse
   | "forall" { FORALL }
   | "Type" { TYPE }
   | "Prop" { PROP }
+  | "ind" { IND }
+  | "|" { PIPE }
+  | "match" { MATCH }
+  | "with" { WITH }
+  | "return" { RETURN }
+  | "end" { END }
+  | ".mk" { MK }
   | "Print" { PRINT }
   | "Check" { CHECK }
   | "Definition" { DEF }

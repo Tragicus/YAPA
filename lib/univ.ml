@@ -4,6 +4,8 @@ module Atom = struct
   (* Shifted universe *)
   type t = string * int
 
+  let static i = ("", i)
+
   let compare l l' = Stdlib.compare l l'
 end
 
@@ -11,6 +13,10 @@ end
 type t = int SMap.t
 
 let of_atom (v, i) = SMap.singleton v i
+
+let static i = of_atom (Atom.static i)
+
+let compare u u' = Stdlib.compare u u'
 
 (* For the impredicativity of Prop, the max of levels ("", i) and ("", 0) should be 0 *)
 let imax i j = if j = 0 then 0 else max i j
