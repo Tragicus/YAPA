@@ -64,6 +64,7 @@ type t =
   | Check of term
   | Define of string * term * term
   | Whd of term
+  | Eval of term
   | Stop
 
 let eval ctx = function
@@ -88,5 +89,10 @@ let eval ctx = function
     let () = Printer.pp_term ctx (Term.whd ctx (capture_vars Utils.SMap.empty ctx t)) in
     let () = print_newline () in
     ctx
+  | Eval t ->
+    let () = Printer.pp_term ctx (Term.eval ctx (capture_vars Utils.SMap.empty ctx t)) in
+    let () = print_newline () in
+    ctx
+
   | Stop -> ctx
 
