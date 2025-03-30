@@ -278,11 +278,11 @@ let rec whd ?(flags=whd_flags_all) ctx t =
     if flags.once then t else eta t body
   | Let (_, _, t, body) when flags.zeta -> whd ~flags ctx (beta t body)
   | App (f :: args) ->
-    (match whd ~flags ctx f, args with
+    (match destApp (mkApp (whd ~flags ctx f) args) with
     | Fun (_ :: tele, body), x :: args when flags.beta ->
       let t = mkApp (beta x (mkFun tele body)) args in
       if flags.once then t else whd ~flags ctx t
-    | Case (ind, recursive) as h, _ when flags.iota ->
+    | Case (ind, recursive) as h, args when flags.iota ->
       let ind, aargs = destApp (whd ctx ind) in
       let (a, c) = try destInd ind with Not_found -> raise (TypeError (ctx, IllFormed h)) in
       let nc = List.length c in
@@ -333,7 +333,7 @@ let reducible ctx t =
   | Fun _ -> args <> []
   | Case (ind, _) ->
     let ind, _ = destApp (whd ctx ind) in
-    let (_, c) = try destInd (whd ctx ind) with Not_found -> raise (TypeError (ctx, IllFormed ind)) in
+    let (_, c) = try destInd ind with Not_found -> raise (TypeError (ctx, IllFormed ind)) in
     let nc = List.length c in
     if List.length args <= 1 + nc then false else
     (match destApp (whd ctx (List.nth args (1 + nc))) with

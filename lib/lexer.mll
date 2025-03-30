@@ -19,6 +19,7 @@ rule token = parse
   | "ind" { IND }
   | "|" { PIPE }
   | "match" { MATCH }
+  | "rec" { REC }
   | "with" { WITH }
   | "return" { RETURN }
   | "end" { END }
@@ -26,6 +27,7 @@ rule token = parse
   | "Print" { PRINT }
   | "Check" { CHECK }
   | "Definition" { DEF }
+  | "Whd" { WHD }
   | "," { COMMA }
   | "." { DOT }
   | "_" { JOKER }
