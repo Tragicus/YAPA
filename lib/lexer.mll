@@ -4,7 +4,8 @@
 
 rule token = parse
   | eof { EOF }
-  | [' ' '\t' '\n']+ { token lexbuf }
+  | [' ' '\t']+ { token lexbuf }
+  | '\n' { Lexing.new_line lexbuf; token lexbuf }
   | ['0'-'9']+ as s { INT (int_of_string s) }
   | '(' { LPAR }
   | ')' { RPAR }
