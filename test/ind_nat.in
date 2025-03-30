@@ -13,8 +13,8 @@ Definition succn : nat -> nat :=
 
 Print succn.
 
-Definition predn : nat -> nat :=
-	fun (n : nat) => match n : nat return fun (n : nat) => nat with
+Definition predn (n : nat) : nat :=
+	match n : nat return fun (n : nat) => nat with
 	| zero
 	| fun (n : nat) => n
 	end.
@@ -22,11 +22,27 @@ Definition predn : nat -> nat :=
 Print predn.
 Whd predn (succn (succn zero)).
 
-Definition addn : nat -> nat -> nat :=
-	fun (n : nat) => match rec n : nat return fun (n : nat) => nat -> nat with
+Definition addn (n : nat) : nat -> nat :=
+	match rec n : nat return fun (n : nat) => nat -> nat with
 	| fun (m : nat) => m
 	| fun (n : nat) (addn : nat -> nat) (m : nat) => succn (addn m)
 	end.
 
 Print addn.
 Eval addn (succn zero) (succn (succn zero)).
+
+Definition list (T : Type) : Type :=
+	ind list : Type | list | T -> list -> list end.
+
+Print list.
+
+Definition nil (T : Type) : list T := (list T).mk 0.
+Definition cons (T : Type) : T -> list T -> list T := (list T).mk 1.
+
+Definition size (T : Type) (l : list T) : nat :=
+	match rec l : list T return fun (l : list T) => nat with
+	| zero
+	| fun (x : T) (l : list T) (ln : nat) => succn ln
+	end.
+
+Eval size nat (cons nat zero (cons nat zero (nil nat))).

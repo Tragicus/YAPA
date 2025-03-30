@@ -546,7 +546,8 @@ let rec type_of ctx t =
             ("_", (mkApp (Var nc) args)) :: rec_calls
           | _ -> rec_calls) (0, ctx, []) ctele in
         List.rev rec_calls in
-      let ctele, cret = destPi (beta ind (mkPi ctele cret)) in
+      (* We need to bump because there is the predicate between the arguments the constructors might refer to and the constructors themselves. *)
+      let ctele, cret = destPi (bump 1 (beta ind (mkPi ctele cret))) in
       let ctele = ctele @ rec_calls in
       let _, cargs = destApp cret in
       let arg = mkPi ctele (bump (List.length rec_calls) (mkApp (Var nc) (cargs @ [mkApp (Construct (cret, ic)) (List.init nc (fun i -> Var (nc-1-i)))]))) in
@@ -555,5 +556,6 @@ let rec type_of ctx t =
     let revtele = ("_", mkApp (bump (na+nc+1) ind) (List.init na (fun i -> Var (na-i-1)))) :: revtele in
     let tele = List.rev revtele in
     mkPi tele (mkApp (Var (na+nc+1)) (List.init (na+1) (fun i -> Var (na-i))))
+
   | _ -> raise (TypeError (ctx, IllFormed t))
 
