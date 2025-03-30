@@ -28,6 +28,7 @@ rule token = parse
   | "Check" { CHECK }
   | "Definition" { DEF }
   | "Whd" { WHD }
+  | "Eval" { EVAL }
   | "," { COMMA }
   | "." { DOT }
   | "_" { JOKER }

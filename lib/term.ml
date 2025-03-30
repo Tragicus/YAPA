@@ -256,67 +256,79 @@ let whd_flags_all = {
   once     = false;
 }
 
-let rec whd ?(flags=whd_flags_all) ctx t =
-  let eta t body =
-    match body with
-    | App l -> 
+(* [eta t] eta-reduces `t`, i.e. turns `Fun [(_, _)] (App (x :: l @ [Var 0]))` into `App (x :: l)` *)
+let eta t =
+  match t with
+  | Fun ([(_, _)], App l) -> 
+    (match List.rev l with
+    | Var 0 :: (_ :: _ as l) when not (occurs (Var 0) (App l)) ->
       (match List.rev l with
-      | Var 0 :: (_ :: _ as l) when not (occurs (Var 0) (App l)) ->
-        (match List.rev l with
-        | [t] -> t
-        | l -> App l)
-      | _ -> t)
-    | _ -> t in
+      | [t] -> t
+      | l -> App l)
+    | _ -> t)
+  | _ -> t
+
+(* [iota ctx t] iota-reduces `t`, i.e. turns `App (Case (App (ind :: indargs), r) :: ret :: branches @ [App (Construct (ind, i) :: sargs)]` into:
+  - `App (List.nth branches i :: indargs @ sargs` if `r` is `false` (non-recursive match)
+  - `App (List.nth branches i :: indargs @ sargs @ rargs` with `args` being recursive calls on the elements of `sargs` that are from the inductive type being matched against if `r` is `true` (recursive match) *)
+
+let rec iota ?(flags=whd_flags_all) ctx t =
+  let h, args = destApp t in
+  match destCase h with
+  | exception Not_found -> t
+  | ind, recursive ->
+  let ind, aargs = destApp (whd ctx ind) in
+  let (a, c) = try destInd ind with Not_found -> raise (TypeError (ctx, IllFormed h)) in
+  let nc = List.length c in
+  (* Getting the subject. *)
+  (match Utils.split_list_at (1 + nc) args with
+  | exception Not_found | _, [] -> t
+  | objs, subject :: eargs ->
+  let ci, sargs = destApp (whd ~flags:(if flags.iota_all then whd_flags_all else flags) ctx subject) in
+  (match destConstruct ci with
+  | exception Not_found -> t
+  | _, i ->
+  let rargs =
+    if not recursive then [] else
+    let ctx = Context.push_var (None, a, None) ctx in
+    let ctele, _ = destArity ctx (List.nth c i) in
+    let _, _, rargs = List.fold_left (fun (iarg, ctx, rargs) (n, arg) ->
+      iarg+1,
+      Context.push_var (Some n, arg, None) ctx,
+      let hd, args = destApp (whd ctx arg) in
+      match hd with
+      | Var i when i = iarg ->
+        let args = List.map
+          (subst (fun i ->
+            if i < iarg then List.nth sargs (iarg-1-i) else
+            if i = iarg then ind else Var(i)))
+          args in
+        (mkApp (Case (mkApp ind args, recursive)) (objs @ [List.nth sargs iarg])) :: rargs
+      | _ -> rargs) (0, ctx, []) ctele in
+    List.rev rargs in
+  let targs = aargs @ sargs @ rargs @ eargs in
+  mkApp (List.nth objs (1+i)) targs))
+
+and whd ?(flags=whd_flags_all) ctx t =
   match t with
   | Const c when flags.delta ->
     let t = Context.get_const_body ctx c in
     if flags.once then t else whd ~flags ctx t
-  | Fun ([(_, _)], body) as t when flags.eta -> eta t body
+  | Fun ([(_, _)], _) as t when flags.eta -> eta t
   | Fun ((v, ty) :: tele, body) when flags.eta ->
     let body = whd ~flags:{ whd_flags_none with eta = true; once = flags.once } (Context.push_var (Some v, ty, None) ctx) (mkFun tele body) in
     let t = mkFun [(v, t)] body in
-    if flags.once then t else eta t body
+    if flags.once then t else eta t
   | Let (_, _, t, body) when flags.zeta -> whd ~flags ctx (beta t body)
   | App (f :: args) ->
     (match destApp (mkApp (whd ~flags ctx f) args) with
     | Fun (_ :: tele, body), x :: args when flags.beta ->
       let t = mkApp (beta x (mkFun tele body)) args in
       if flags.once then t else whd ~flags ctx t
-    | Case (ind, recursive) as h, args when flags.iota ->
-      let ind, aargs = destApp (whd ctx ind) in
-      let (a, c) = try destInd ind with Not_found -> raise (TypeError (ctx, IllFormed h)) in
-      let nc = List.length c in
-      (* Getting the subject. *)
-      (match Utils.split_list_at (1 + nc) args with
-      | exception Not_found | _, [] -> App (h :: args)
-      | objs, subject :: eargs ->
-      let ci, sargs = destApp (whd ~flags:(if flags.iota_all then whd_flags_all else flags) ctx subject) in
-      (match destConstruct ci with
-      | exception Not_found -> App (h :: args)
-      | _, i ->
-      let rargs =
-        if not recursive then [] else
-        let ctx = Context.push_var (None, a, None) ctx in
-        let ctele, _ = destArity ctx (List.nth c i) in
-        let _, _, rargs = List.fold_left (fun (iarg, ctx, rargs) (n, arg) ->
-          iarg+1,
-          Context.push_var (Some n, arg, None) ctx,
-          let hd, args = destApp (whd ctx arg) in
-          match hd with
-          | Var i when i = iarg ->
-            let args = List.map
-              (subst (fun i ->
-                if i < iarg then List.nth sargs (iarg-1-i) else
-                if i = iarg then ind else Var(i)))
-              args in
-            (mkApp (Case (mkApp ind args, recursive)) (objs @ [List.nth sargs iarg])) :: rargs
-          | _ -> rargs) (0, ctx, []) ctele in
-        List.rev rargs in
-      let targs = aargs @ sargs @ rargs @ eargs in
-      let t = mkApp (List.nth objs (1+i)) targs in
-      if flags.once then t else whd ~flags ctx t
-      ))
-    | h, _ -> App (h :: args))
+    | Case (_, _), _ when flags.iota ->
+      let t' = iota ~flags ctx t in
+      if flags.once || t' = t then t else whd ~flags ctx t'
+    | h, _ -> mkApp h args)
   | t -> t
 
 and destArity ?(whd_rty=false) ctx t =
@@ -325,6 +337,29 @@ and destArity ?(whd_rty=false) ctx t =
     let tele2, r = destArity (Context.push_telescope tele ctx) body in
     tele @ tele2, r
   | t' -> [], if whd_rty then t' else t
+
+(* Complete reduction. *)
+let rec eval ctx t =
+  match t with
+  | Const c ->
+    (match Context.get_const_body ctx c with
+    | exception Not_found -> t
+    | t -> eval ctx t)
+  | Fun ([(_, _)], _) as t -> eta t
+  | Fun ((v, ty) :: tele, body) ->
+    let body = eval (Context.push_var (Some v, ty, None) ctx) (mkFun tele body) in
+    eta (mkFun [(v, t)] body)
+  | Let (_, _, t, body) -> eval ctx (beta t body)
+  | App l ->
+    (match List.map (eval ctx) l with
+    | Fun (_ :: tele, body) :: x :: args ->
+      let t = mkApp (beta x (mkFun tele body)) args in
+      eval ctx t
+    | Case (_, _) :: _ ->
+      let t' = iota ctx t in
+      if t' = t then t else eval ctx t'
+    | l -> App l)
+  | t -> t
 
 let reducible ctx t =
   let h, args = destApp t in

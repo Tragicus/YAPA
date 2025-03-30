@@ -5,7 +5,7 @@
 %token LET IN FORALL TARROW COMMA DOT JOKER COLON COLONEQ
 %token TYPE PROP
 %token IND PIPE MATCH REC WITH RETURN END MK
-%token PRINT CHECK DEF WHD
+%token PRINT CHECK DEF WHD EVAL
 
 %nonassoc COMMA
 %nonassoc ARROW
@@ -32,6 +32,7 @@ command:
   | CHECK; term; DOT { Commands.Check $2 }
   | DEF; VAR; COLON; term; COLONEQ; term; DOT { Commands.Define ($2, $4, $6) }
   | WHD; term; DOT { Commands.Whd $2 }
+  | EVAL; term; DOT { Commands.Eval $2 }
 
 term:
   | FUN; telescope; ARROW; term { Commands.mkFun $2 $4 }
