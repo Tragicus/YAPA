@@ -12,9 +12,9 @@ end
 (* Max of shifted universes *)
 type t = int SMap.t
 
-let of_atom (v, i) = SMap.singleton v i
+let of_atom v i = SMap.singleton v i
 
-let static i = of_atom (Atom.static i)
+let static i = let v, i = Atom.static i in of_atom v i
 
 let compare u u' = Stdlib.compare u u'
 
@@ -24,56 +24,62 @@ let imax i j = if j = 0 then 0 else max i j
 let shift i l = SMap.map (fun j -> j + i) l
 let max l l' = SMap.union (fun v i j -> Some ((if v = "" then imax else max) i j)) l l'
 
-type context = t SMap.t
-
 type universe_error =
+  | LoopAt of string
   | IncompatibleConstraint of t * Atom.t
   | UnsupportedConstraint of t * t
+
+type context = t list SMap.t
 
 exception UnivError of context * universe_error
 
 module Context = struct
-  (*  Constraint graph, where an arc l -> l' means l <= l'.
-      Every constraint of the form
+  (* Constraint graph, where an arc l -> l' means l <= l'.
+     Every constraint of the form
        max(l_1, ..., l_n) <= l' is equivalent to l_1 <= l' /\ ... /\ l_n <= l', so we only
        store constraints of the form l <= l' for l an atomic level.
-      Constraints of the form v+i <= l are stored as v <= l-i.
-      We do not support l <= max(...)
-      *)
+     Constraints of the form v+i <= l are stored as v <= l-i. *)
+  
   type t = context
 
-  (* Computes the minimum i such that ctx => (v <= v'+i) *)
-  let dist ctx v v' =
-    let module Heap = Set.Make(struct type t = Atom.t let compare (v, i) (v', i') = if i = i' then String.compare v v' else Int.compare i i' end) in
-    let rec aux visited next =
-      match Heap.min_elt next with
-      | exception _ -> None
-      | (w, d) as x ->
-        if w = v' then Some d else
-        let next = Heap.remove x next in
-        if SSet.mem w visited then aux visited next else
-        let visited = SSet.add w visited in
-        let next = SMap.fold (fun v i -> Heap.add (v, d+i)) (try SMap.find w ctx with _ -> SMap.empty) next in
-        aux visited next
-    in aux SSet.empty (Heap.singleton (v, 0))
+  let satisfiable g =
+    let offset cstr = min 0 (min_smap cstr) in
+    let m = max_smap (SMap.map (fun cstrs -> max_list (List.map (fun cstr -> max_smap cstr - offset cstr) cstrs)) g) in
+    let f = SMap.map (fun _ -> m) g in
+    let rec saturate f updated =
+      if SSet.is_empty updated then f else
+      let n_updated = SSet.cardinal updated in
+      let f, updated = SMap.fold (fun v cstrs (f, updated) ->
+          if not (SSet.mem v updated) then (f, updated) else
+          let m = max_list (List.map (fun cstr ->
+            let offset = offset cstr in
+            min_smap (SMap.mapi (fun v i -> SMap.find v f - i) cstr) - 2*offset) cstrs) in
+          if SMap.find v f < m then (SMap.add v m f, SSet.add v updated) else (f, updated))
+        g (f, SSet.empty) in
+      if SSet.cardinal updated = n_updated then raise (UnivError (g, (LoopAt (SSet.choose updated)))) else
+      saturate f updated in
+    saturate f (SMap.fold (fun v _ -> SSet.add v) g SSet.empty)
 
-  (* Is (v, i) <= (v', i') a constraint that is compatible with ctx? *)
-  let is_compatible_atomic_constraint ctx (v, i) (v', i') =
-    match dist ctx v' v with
-    | None -> true
-    | Some d -> d+i'+1 <= i
+  (* Turns an inequality l <= l' into an equivalent constraint graph *)
+  let normalize l l' = SMap.map (fun i -> [shift (-i) l']) l
 
-  (* Is l <= l' a constraint that is compatible with ctx? *)
-  let is_compatible_constraint ctx l l' =
-    SMap.for_all (fun v i -> is_compatible_atomic_constraint ctx (v, i) l') l
+  (* Adds the constraints in g to the constraints in g'. g is expected to be small in comparison to g'. *)
+  let add g g' = SMap.union (fun _ c c' -> Some (c @ c')) g g'
 
-  let add_constraint ctx l l' =
-    if SMap.cardinal l' <> 1 then raise (UnivError (ctx, UnsupportedConstraint (l, l'))) else
-    let (v', i') as l' = SMap.choose l' in
-    if is_compatible_constraint ctx l l' then
-      SMap.fold (fun v i ->
-        let i' = i' - i in
-        SMap.update v (function | None -> Some (SMap.singleton v' i') | Some m ->
-          Some (SMap.update v' (function | None -> Some i' | Some j -> Some (min i' j)) m))) l ctx
-    else raise (UnivError (ctx, IncompatibleConstraint (l, l')))
+  (* Substitute every variable appearing in g with the universe given by subst *)
+  let subst subst g =
+    let addl l = List.fold_left (fun g g' -> add g' g) SMap.empty l in
+    addl (List.map
+      (fun (v, cstrs) ->
+        let lv = try SMap.find v subst with Not_found -> of_atom v 0 in
+        let cstrs = List.map (fun cstr ->
+          let cstr = SMap.bindings cstr in
+          let cstr = List.map
+            (fun (v, i) -> try shift i (SMap.find v subst) with Not_found -> of_atom v i)
+            cstr in
+          List.fold_left max SMap.empty cstr) cstrs in
+        let cstrs = List.map (normalize lv) cstrs in
+        addl cstrs)
+      (SMap.bindings g))
+
 end
