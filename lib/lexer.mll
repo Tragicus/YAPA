@@ -9,6 +9,8 @@ rule token = parse
   | ['0'-'9']+ as s { INT (int_of_string s) }
   | '(' { LPAR }
   | ')' { RPAR }
+  | '{' { LCBRACE }
+  | '}' { RCBRACE }
   | "fun" { FUN }
   | "=>" { ARROW }
   | "->" { TARROW }
@@ -35,5 +37,6 @@ rule token = parse
   | "_" { JOKER }
   | ":" { COLON }
   | ":=" { COLONEQ }
+  | '@' { AT }
   | ['a'-'z' 'A'-'Z'] ['a'-'z' 'A'-'Z' '0'-'9']* as s { VAR s }
   | _  { failwith "lexical error" }
