@@ -6,7 +6,7 @@ type 'a arity = 'a telescope * 'a
 
 type t =
   | Var of int (* De Bruijn indices *)
-  | Const of string
+  | Const of Univ.t list * string
   | Fun of t telescope * t
   | App of t list (* FIXME: slow *)
   | Type of Univ.t
@@ -20,8 +20,9 @@ type term = t
 (* Invariant : depth = List.length var *)
 type context = {
   depth : int;
+  univ : Univ.Context.t;
   var : (string option * t * t option) list;
-  const : (t * t) SMap.t
+  const : (Univ.Context.t * t * t) SMap.t
 }
 
 type type_error =
@@ -48,7 +49,7 @@ let destVar = function
   | _ -> raise Not_found
 
 let destConst = function
-  | Const c -> c
+  | Const (u, c) -> (u, c)
   | _ -> raise Not_found
 
 let destFun = function
@@ -110,38 +111,33 @@ let rec print e =
   | Pi (tele, body) -> () ++ "(forall"; pr_telescope tele ++ ", " + body ++ ")"
   | Let (v, ty, t, body) -> () ++ "(let " ++ v ++ " : " + ty ++ " := " + t ++ " in " + body ++ ")"
   | Var v -> () ++ "Var "; print_int v
-  | Const v -> () ++ "Const " ++ v
+  | Const (us, v) -> () ++ "Const " ++ v ++ "@{"; Utils.print_with_sep ", " Univ.print us ++ "}"
   | App (f :: a) ->
     let (+) = fun _ e -> () ++ "(" + e ++ ")" in
     () ++ "App " + f; List.iter (fun e -> () ++ " " + e) a
-  | Type l ->
-    let pr_atom v i =
-      if v = "" then
-        (if i = 0 then
-          () ++ "Prop"
-        else (() ++ "Type@{"; print_int i ++ "}"))
-      else if i = 0 then () ++ v else (() ++ v ++ "+"; print_int i) in
-    if SMap.cardinal l = 1 then
-      let (v, i) = SMap.choose l in pr_atom v i
-    else (() ++ "Type@{max("; SMap.iter (fun v i -> pr_atom v i ++ ", ") l ++ ")")
+  | Type u ->
+    if Univ.isProp u then () ++ "Prop" else
+    () ++ "Type@{"; Univ.print u ++ "}"
   | Ind (arity, constructors) ->
     () ++ "ind" ++ " : " + arity ++ " :="; List.iter (fun t -> () ++ " | " + t) constructors
   | Construct (ind, id) ->
     () ++ "ind.mk(" + ind ++ ")."; print_int id
   | Case (ind, recursive) ->
     () ++ (if recursive then "ind.fix(" else "ind.case(") + ind ++ ")"
-  | _ -> raise (TypeError ({ depth = 0; var = []; const = SMap.empty }, IllFormed e))
+  | _ -> raise (TypeError ({ depth = 0; univ = Univ.Context.empty; var = []; const = SMap.empty }, IllFormed e))
 
 (* Replaces t by \lambda^k. t, avoiding capture *)
-let rec bump k t = if k = 0 then t else subst (fun i -> Var (i + k)) t
+let rec bump k t = if k = 0 then t else subst (fun i -> Var (i + k)) (fun i -> Univ.of_atom i 0) t
 
-(* Replaces every `Var i` in `t` by `f i`, avoiding capture. *)
-and subst f t =
+(* Replaces every `Var i` in `t` by `fvar i`, avoiding capture and `Type u` with `Type (funiv u)`. *)
+and subst fvar funiv t =
   let rec aux k t =
     match t with
     | Var i when i < k -> t
-    | Const _ | Type _ -> t
-    | Var i -> bump k (f (i - k))
+    | Const (u, c) -> Const (List.map (Univ.subst funiv) u, c)
+    | Type u ->
+      Type (Univ.subst funiv u)
+    | Var i -> bump k (fvar (i - k))
     | App l -> App (List.map (aux k) l)
     | Fun (tele, body) ->
       let k, tele = List.fold_left_map (fun k (v, ty) -> k+1, (v, aux k ty)) k tele in
@@ -157,14 +153,27 @@ and subst f t =
   aux 0 t
 
 (* [beta t t'] beta-reduces (\lambda. t') t *)
-let beta t = subst (fun i -> if i = 0 then t else Var (i-1))
+let beta t = subst (fun i -> if i = 0 then t else Var (i-1)) (fun i -> Univ.of_atom i 0)
 
-let is_ground t = try ignore (subst (fun _ -> raise Not_found) t); true with Not_found -> false
+let is_ground t = try ignore (subst (fun _ -> raise Not_found) (fun i -> Univ.of_atom i 0) t); true with Not_found -> false
+
+let rec free_univs = function
+  | Var _ -> ISet.empty
+  | Type u -> Univ.free_vars u
+  | Const (u, _) -> List.fold_left ISet.union ISet.empty (List.map Univ.free_vars u)
+  | App l -> List.fold_left ISet.union ISet.empty (List.map free_univs l)
+  | Fun (tele, body) | Pi (tele, body) ->
+    List.fold_left ISet.union (free_univs body) (List.map (fun (_, t) -> free_univs t) tele)
+  | Let (_, ty, t, body) ->
+    ISet.union (ISet.union (free_univs ty) (free_univs t)) (free_univs body)
+  | Ind (a, c) ->
+    List.fold_left ISet.union (free_univs a) (List.map free_univs c)
+  | Construct (ind, _) | Case (ind, _) -> free_univs ind
 
 module Context = struct
   type t = context
 
-  let empty = { depth = 0; var = []; const = SMap.empty } 
+  let empty = { depth = 0; univ = Univ.Context.empty; var = []; const = SMap.empty }
 
   let push_var (v, ty, body) ctx = { ctx with depth = ctx.depth+1; var = (v, bump 1 ty, Option.map (bump 1) body) :: ctx.var }
 
@@ -235,13 +244,15 @@ module Context = struct
           let* b = f x in
           if b then for_all f l else ret b
 
-      let for_all2 f l l' = for_all (fun (x, y) -> f x y) (List.combine l l')
+      let for_all2 f l l' ctx = for_all (fun (x, y) -> f x y) (List.combine l l') ctx
     end
   end
 
   open Monad.Notations
 
   let depth ctx = ctx.depth
+
+  let univ ctx = ctx.univ
 
   let find_var i ctx =
     try List.nth ctx.var i with _ -> raise (TypeError (ctx, UnboundVar i))
@@ -261,17 +272,49 @@ module Context = struct
 
   let var_depth = depth
 
-  let get_const_type c = let+* x = find_const c in fst x
-  let get_const_body c = let+* x = find_const c in snd x
+  let get_const_univ c =
+    let+* (u, _, _) = find_const c in u
+  let get_const_type c =
+    let+* (_, t, _) = find_const c in t
+  let get_const_body c =
+    let+* (_, _, b) = find_const c in b
 
-  let push_const c (t, ty) ctx = { ctx with const = SMap.add c (subst (fun _ -> raise (TypeError (ctx, NotGround t))) t, ty) ctx.const }, ()
+  let push_var (v, ty, body) ctx = { ctx with depth = ctx.depth+1; var = (v, bump 1 ty, Option.map (bump 1) body) :: ctx.var }
+
+  let new_univ ctx =
+    let univ, u = Univ.Context.new_univ ctx.univ in
+    { ctx with univ }, u
+
+  let new_univs_with_constraints univs ctx =
+    let univ, newu = Univ.Context.push_ctx univs ctx.univ in
+    { ctx with univ }, newu
+
+  let add_univ_constraints univ ctx =
+    let univ = Univ.Context.add univ ctx.univ in
+    let _ = Univ.Context.satisfiable univ in
+    { ctx with univ }, ()
+
+  let add_univ_constraint u u' ctx =
+    add_univ_constraints (Univ.Context.normalize u u') ctx
+
+  let push_const c (u, t, ty) ctx =
+    if not (is_ground t) then raise (TypeError (ctx, NotGround t)) else
+    { ctx with const = SMap.add c (u, t, ty) ctx.const }, ()
+
+  let push_telescope tele ctx =
+    List.fold_left (fun ctx (v, ty) -> push_var (Some v, ty, None) ctx) ctx tele, ()
+
+  let pop_var ctx =
+    match ctx.var with
+    | [] -> raise (TypeError (ctx, UnboundVar 0))
+    | _ :: var -> { ctx with depth = ctx.depth-1; var }, ()
 
   let print ctx =
-    (print_string "CTX:\n\t Local variables:\n";
+    print_string "CTX:\n\t Local variables:\n";
     List.iteri (fun i (v, ty, t) -> print_string "\t\t"; print_string (Option.value v ~default:("_" ^ string_of_int i)); print_string " : "; print ty; (match t with | None -> () | Some t -> print_string " := "; print t); print_string "\n") ctx.var;
     print_string "\n\t Global variables:\n";
-    SMap.iter (fun v (ty, body) -> print_string "\t\t"; print_string v; print_string " : "; print ty; print_string " := "; print body; print_string "\n") ctx.const;
-    print_string "\n")
+    SMap.iter (fun v (_, ty, body) -> print_string "\t\t"; print_string v; print_string " : "; print ty; print_string " := "; print body; print_string "\n") ctx.const;
+    print_string "\n"
 end
 
 open Context.Monad.Notations
@@ -371,7 +414,7 @@ let rec iota ?(flags=whd_flags_all) t : t Context.Monad.it =
         let args = List.map
           (subst (fun i ->
             if i < iarg then List.nth sargs (iarg-1-i) else
-            if i = iarg then ind else Var(i)))
+            if i = iarg then ind else Var(i)) (fun i -> Univ.of_atom i 0))
           args in
         (mkApp (Case (mkApp ind args, recursive)) (objs @ [List.nth sargs iarg])) :: rargs
       | _ -> rargs)) (0, []) ctele Context.Monad.ret in
@@ -384,8 +427,12 @@ and whd ?(flags=whd_flags_all) t =
   let** () = Context.Monad.iret () in
   (* let _ = print_string "whd "; print t; print_string "\n" in *)
   match t with
-  | Const c when flags.delta ->
+  | Const (univs, c) when flags.delta ->
+    let** u = Context.get_const_univ c in
     let** t = Context.get_const_body c in
+    let u = try List.tl (IMap.bindings u) with _ -> [] in
+    let u = List.fold_left (fun g (v, u) -> IMap.add v u g) IMap.empty (List.map2 (fun (v, _) u -> (v, u)) u univs) in
+    let t = subst (fun i -> Var i) (fun i -> try IMap.find i u with _ -> Univ.of_atom i 0) t in
     if flags.once then Context.Monad.iret t else whd ~flags t
   | Fun ([(_, _)], _) as t when flags.eta -> Context.Monad.iret (eta t)
   | Fun ((v, ty) :: tele, body) when flags.eta ->
@@ -423,7 +470,7 @@ let rec eval t =
   (* Block reduction until we get the context. *)
   let** () = Context.Monad.iret () in
   match t with
-  | Const c ->
+  | Const (_, c) ->
     let** body = Context.get_const_body c in
     (match body with
     | exception Not_found -> Context.Monad.iret t
@@ -464,7 +511,13 @@ let reducible t =
   | Const _ | Let _ -> Context.Monad.iret true
   | _ -> failwith "Internal error : head should not by an application."
 
-let rec unify t1 t2 =
+type cumulativity = Conv | Cumul | Cocumul
+let swap_cumulativity = function
+  | Conv -> Conv
+  | Cumul -> Cocumul
+  | Cocumul -> Cumul
+
+let rec unify ?(cumulative=Conv) t1 t2 =
   (* Block reduction until we get the context. *)
   let** () = Context.Monad.iret () in
   let (&&) state f =
@@ -487,9 +540,9 @@ let rec unify t1 t2 =
         let+ b = unify ty1 ty2 in (b, tele2)
       ) (true, tele2) tele1 (fun (b, _) ->
       Context.Monad.ret b &&
-      unify (builder etele1 body1) (builder etele2 body2)) in
+      unify ~cumulative (builder etele1 body1) (builder etele2 body2)) in
   (* unifies t1 and t2 when t2 is reducible *)
-  let rec mixed (h1, args1 as t1) (h2, args2) =
+  let rec mixed ?(cumulative=Conv) (h1, args1 as t1) (h2, args2) =
     match h1, h2 with
     | h1, Fun (tele2, body2) ->
       (match h1 with
@@ -498,47 +551,66 @@ let rec unify t1 t2 =
         Context.Monad.List.for_all2 unify args1 args2
       | _ -> Context.Monad.ret false) ||
       let** t2 = whd ~flags:{ whd_flags_none with beta = true; once = true } (mkApp h2 args2) in
-      aux t1 (destApp t2)
+      aux ~cumulative t1 (destApp t2)
 
     | h1, Let (_, ty2, t2, body2) ->
       (match h1 with
       | Let (v, ty1, t1, body1) ->
-        unify ty1 ty2 && unify t1 t2 && Context.Monad.with_var (Some v, ty1, None) (unify body1 body2) && Context.Monad.List.for_all2 unify args1 args2
+        unify ty1 ty2 && unify t1 t2 && Context.Monad.with_var (Some v, ty1, None) (unify ~cumulative (mkApp body1 args1) (mkApp body2 args2))
       | _ -> Context.Monad.ret false) ||
       let** t2 = whd ~flags:{ whd_flags_none with zeta = true; once = true } (mkApp h2 args2) in
-      aux t1 (destApp t2)
+      aux ~cumulative t1 (destApp t2)
 
     | h1, Var i2 ->
       (match h1 with
       | Var i1 -> Context.Monad.ret (i1 = i2) && Context.Monad.List.for_all2 unify args1 args2
       | _ -> Context.Monad.ret false) ||
       let** t2 = Context.get_var_body i2 in
-      aux t1 (destApp (mkApp t2 args2))
+      aux ~cumulative t1 (destApp (mkApp t2 args2))
 
-    | _, Const c ->
-      let** t2 = Context.get_const_body c in
-      aux t1 (destApp (mkApp t2 args2))
+    | _, Const (u2, c2) ->
+      (match h1 with
+      | Const (u1, c1) -> Context.Monad.ret (c1 = c2) && (
+        Context.Monad.ret (List.length args1 = List.length args2) && (
+        Context.Monad.List.for_all2 (fun u u' ctx ->
+          try
+            (let* () = Context.add_univ_constraint u u' in
+            let+ () = Context.add_univ_constraint u' u in true) ctx
+          with _ -> ctx, false) u1 u2) &&
+        Context.Monad.List.for_all2 unify args1 args2)
+      | _ -> Context.Monad.ret false) ||
+      let** t2 = Context.get_const_body c2 in
+      aux ~cumulative t1 (destApp (mkApp t2 args2))
 
     | h1, Case (ind2, recursive2) ->
       (match h1 with
       | Case (ind1, recursive1) -> Context.Monad.ret (recursive1 = recursive2) && unify ind1 ind2
       | _ -> Context.Monad.ret false) ||
       let** t2 = whd ~flags:{ whd_flags_none with iota = true; once = true } (mkApp h2 args2) in
-      aux t1 (destApp t2)
+      aux ~cumulative t1 (destApp t2)
 
     | _, _ -> failwith "Internal error : non-reducible term classified as maybe reducible."
 
-  and aux (h1, args1 as t1) (h2, args2 as t2) =
+  and aux ?(cumulative=Conv) (h1, args1 as t1) (h2, args2 as t2) =
     (* Block reduction until we get the context. *)
     let** () = Context.Monad.iret () in
     (* let () = print_string "unify "; print (mkApp h1 args1); print_string "\n  and "; print (mkApp h2 args2); print_string "\n\n" in *)
     let** b = reducible (mkApp h2 args2) in
-    if b then mixed t1 t2 else
+    if b then mixed ~cumulative t1 t2 else
     let** b = reducible (mkApp h1 args1) in
-    if b then mixed t2 t1 else
+    if b then mixed ~cumulative t2 t1 else
     match h1, h2 with
     | Var i, Var j -> Context.Monad.ret (i = j) && Context.Monad.List.for_all2 unify args1 args2
-    | Type _, Type _ -> Context.Monad.ret true (* FIXME: implement universes *)
+    | Type u, Type u' -> (fun ctx -> try
+        match cumulative with
+        | Cumul -> 
+          (let+ () = Context.add_univ_constraint u u' in true) ctx
+        | Cocumul -> 
+          (let+ () = Context.add_univ_constraint u' u in true) ctx
+        | Conv ->
+          (let* () = Context.add_univ_constraint u u' in
+          let+ () = Context.add_univ_constraint u u' in true) ctx
+      with _ -> ctx, false)
     | Fun (tele1, body1), Fun (tele2, body2)
     | Pi (tele1, body1), Pi (tele2, body2) ->
       unify_fun ~builder:mkPi (tele1, body1) (tele2, body2) && Context.Monad.List.for_all2 unify args1 args2
@@ -547,7 +619,7 @@ let rec unify t1 t2 =
     | Construct (ind1, i1), Construct (ind2, i2) -> Context.Monad.ret (i1 = i2) && unify ind1 ind2
     | Case (ind1, r1), Case (ind2, r2) -> Context.Monad.ret (r1 = r2) && unify ind1 ind2
     | _, _ -> Context.Monad.ret false in
-  aux (destApp t1) (destApp t2)
+  aux ~cumulative (destApp t1) (destApp t2)
 
 let rec type_of t =
   (* Block reduction until we get the context. *)
@@ -564,7 +636,15 @@ let rec type_of t =
       | _ -> fun ctx -> raise (TypeError (ctx, NotAType t))) [] tele (fun tele -> k (List.rev tele)) in
   match t with
   | Var i -> Context.Monad.to_mut (Context.get_var_type i)
-  | Const v -> Context.Monad.to_mut (Context.get_const_type v)
+  | Const (u, c) ->
+    let** uctx = Context.get_const_univ c in
+    let nu = List.length u in
+    let uctx = Univ.Context.subst (fun i ->
+      if 0 < i && i <= nu then List.nth u (i-1) else
+      Univ.of_atom i 0) uctx in
+    let* () = Context.add_univ_constraints uctx in
+    Context.Monad.to_mut (let+* ty = Context.get_const_type c in
+    subst (fun i -> Var i) (fun i -> if i = 0 then Univ.static 0 else List.nth u (i-1)) ty)
   | Type l -> Context.Monad.ret (Type (Univ.shift 1 l))
   | Fun (tele, body) ->
     type_telescope tele (fun _ -> let* ty = type_of body in Context.Monad.ret (mkPi tele ty))
@@ -581,14 +661,16 @@ let rec type_of t =
   | App (f :: a) ->
     List.fold_left (fun ty t ->
       let* ty = ty in
-      let** ty = whd ty in fun ctx ->
+      let** ty = whd ty in
       match ty with
-      | Pi ([], body) -> ctx, body
+      | Pi ([], body) -> Context.Monad.ret body
       | Pi ((_, ty) :: tele, body) ->
-        let ctx, tyt = type_of t ctx in
-        let ctx, b = unify tyt ty ctx in
-        if b then ctx, beta t (mkPi tele body) else raise (TypeError (ctx, TypeMismatch (ty, t)))
-      | _ -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (type_of f) a
+        let* tyt = type_of t in
+        let* b = unify ~cumulative:Cumul tyt ty in
+        if not b then fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, t))) else
+        let** ty = whd ~flags:({ whd_flags_none with beta = true }) (beta t (mkPi tele body)) in
+        Context.Monad.ret ty
+      | _ -> fun ctx -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (type_of f) a
   | Let (v, ty, t, body) ->
     let* tbody = Context.Monad.with_var (Some v, ty, Some t) (type_of body) in
     Context.Monad.ret (beta ty tbody)
@@ -641,19 +723,21 @@ let rec type_of t =
     let** _, c = fun ctx -> try destInd ind' with _ -> raise (TypeError (ctx, IllFormed t)) in
     if List.length c <= i then fun ctx -> raise (TypeError (ctx, IllFormed t)) else
     Context.Monad.ret (beta ind (List.nth c i))
-  | Case (ind, recursive) ->
+  | Case (ind', recursive) ->
     (* Check ind is well-typed *)
-    let* _ = type_of ind in
+    let* _ = type_of ind' in
     (* Get ind's content *)
-    let** ind = whd ind in
+    let** ind = whd ind' in
     let ind, _ = destApp ind in
     let** (a, c) = fun ctx -> try destInd ind with _ -> raise (TypeError (ctx, IllFormed t)) in
     (* Get a's arity *)
-    let** atele, _ = destArity a in
+    let** atele, asort = destArity a in
+    let** asort = fun ctx -> try destType asort with _ -> raise (TypeError (ctx, NotAType ind')) in
     let na = List.length atele in
-    (* FIXME : The return type's return type should not necessarily be Prop. *)
+    let* runiv = Context.new_univ in
+    let* () = Context.add_univ_constraint runiv asort in
     (* Build the predicate that gives the return type of the match... *)
-    let rty = mkPi (atele @ [("_", mkApp ind (List.init na (fun i -> Var (na-i-1))))]) (Type (Univ.static 0)) in
+    let rty = mkPi (atele @ [("_", mkApp ind' (List.init na (fun i -> Var (na-i-1))))]) (Type runiv) in
     (* Start building the result's telescope, in reverse order *)
     let revtele = [("_", rty)] in
     (* The constructors expect the inductive type to be at position 0 in the context. *)
@@ -681,15 +765,63 @@ let rec type_of t =
         (0, []) ctele
         (fun (_, rec_calls) -> Context.Monad.ret (List.rev rec_calls)) in
       (* We need to bump because there is the predicate between the arguments the constructors might refer to and the constructors themselves. *)
-      let ctele, cret = destPi (bump 1 (beta ind (mkPi ctele cret))) in
+      let ctele, cret = destPi (bump 1 (beta ind' (mkPi ctele cret))) in
       let ctele = ctele @ rec_calls in
       let _, cargs = destApp cret in
       let arg = mkPi ctele (bump (List.length rec_calls) (mkApp (Var nc) (cargs @ [mkApp (Construct (cret, ic)) (List.init nc (fun i -> Var (nc-1-i)))]))) in
       let arg = bump ic arg in
       Context.Monad.iret (ic+1, ("_", arg) :: revtele)) (Context.Monad.iret (0, revtele)) c in
-    let revtele = ("_", mkApp (bump (na+nc+1) ind) (List.init na (fun i -> Var (na-i-1)))) :: revtele in
+    let revtele = ("_", mkApp (bump (na+nc+1) ind') (List.init na (fun i -> Var (na-i-1)))) :: revtele in
     let tele = List.rev revtele in
-    Context.Monad.ret (mkPi tele (mkApp (Var (na+nc+1)) (List.init (na+1) (fun i -> Var (na-i))))))
+    let ty = mkPi tele (mkApp (Var (na+nc+1)) (List.init (na+1) (fun i -> Var (na-i)))) in
+    Context.Monad.ret ty)
 
   | _ -> fun ctx -> raise (TypeError (ctx, IllFormed t))
+
+let elim_irrelevant_univs body =
+  let** univ = fun ctx -> ctx.univ in
+  let* body =
+    let renaming = Univ.Context.decycle univ in
+    let renaming i = Univ.of_atom (try IMap.find i renaming with Not_found -> i) 0 in
+    let body = subst (fun i -> Var i) renaming body in
+    let univ = Univ.Context.subst renaming univ in
+    fun ctx -> {ctx with univ = univ}, body in
+  let* ty = type_of body in
+  let funivs = Utils.ISet.add 0 (free_univs ty) in
+  let tunivs = Utils.IMap.fold (fun u _ s -> Utils.ISet.add u s) univ Utils.ISet.empty in
+  let bunivs = Utils.ISet.diff tunivs funivs in
+  let univ = Utils.ISet.fold Univ.Context.elim bunivs univ in
+  let _, renaming = IMap.fold (fun v _ (i, renaming) -> i+1, IMap.add v i renaming) univ (0, IMap.empty) in
+  let univ = Univ.Context.rename (fun i -> IMap.find i renaming) univ in
+  let body = subst (fun i -> Var i) (fun i -> Univ.of_atom (try IMap.find i renaming with Not_found -> -1) 0) body in
+  let ty = subst (fun i -> Var i) (fun i -> Univ.of_atom (try IMap.find i renaming with Not_found -> -1) 0) ty in
+  fun ctx -> {ctx with univ = univ}, (body, ty)
+
+(*let rec check_univ_covariance ctx u t =
+  let max_cov = function
+  | Univ.Invariant, _ | _, Univ.Invariant -> Univ.Invariant
+  | Univ.Irrelevant n, Univ.Irrelevant n' -> Univ.Irrelevant (max n n')
+  | Univ.Irrelevant n, Univ.Covariant n' | Univ.Covariant n, Univ.Covariant n' | Univ.Covariant n, Univ.Irrelevant n' -> Univ.Covariant (max n n')
+  | Univ.Irrelevant _, _ | _, Univ.Invariant -> cov'
+  | Univ.Contravariant, Univ.Contravariant -> Univ.Contravariant
+  | Univ.Contravariant, _ -> Univ.Invariant in
+  match t with
+  | Var v -> 
+    (try check_univ_covariance ctx u (Context.get_var_body ctx i2) with _ -> Univ.Irrelevant 0)
+  | Const (u, c) ->
+    List.fold_left2 (fun cov u' cov' ->
+      if not (IMap.mem u u') then cov else max_cov cov cov'
+      ) (Univ.Irrelevant 0) (Context.get_const_univ ctx c) (Context.get_const_univ_covariance ctx c)
+  | Fun (tele, body) ->
+    let cov = List.fold_left2 (fun cov (_, t) ->
+      max_cov cov (match check_univ_covariance t with | Univ.Irrelevant -> Univ.Irrelevant | _ -> Univ.Invariant)
+    ) (Univ.Irrelevant 0) tele in
+    max_cov cov (check_univ_covariance t)
+  | Pi (tele, body) ->
+    let cov = List.fold_left2 (fun cov (_, t) ->
+      max_cov cov (match check_univ_covariance t with | Univ.Irrelevant -> Univ.Irrelevant | _ -> Univ.Invariant)
+    ) (Univ.Irrelevant 0) tele in
+    max_cov cov (check_univ_covariance t)
+*)
+
 
