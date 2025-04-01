@@ -1,8 +1,8 @@
 %token <int> INT
 %token <string> VAR
 %token EOF
-%token LPAR RPAR FUN ARROW
-%token LET IN FORALL TARROW COMMA DOT JOKER COLON COLONEQ
+%token LPAR RPAR LCBRACE RCBRACE FUN ARROW
+%token LET IN FORALL TARROW COMMA DOT JOKER COLON COLONEQ AT
 %token TYPE PROP
 %token IND PIPE MATCH REC WITH RETURN END MK
 %token PRINT CHECK DEF WHD EVAL
@@ -18,7 +18,7 @@
 %type <Commands.term> sterm
 
 %{
-  open Utils
+  (*open Utils*)
 
 %}
 
@@ -27,10 +27,16 @@
 toplevel:
   | list(command); EOF { $1 }
 
+univ_annot:
+  | AT; LCBRACE; VAR; RCBRACE { $3 }
+
+univ_annots:
+  | AT; LCBRACE; separated_list(COMMA, VAR); RCBRACE { $3 }
+
 command:
   | PRINT; term; DOT { Commands.Print $2 }
   | CHECK; term; DOT { Commands.Check $2 }
-  | DEF; VAR; telescope; COLON; term; COLONEQ; term; DOT { Commands.Define ($2, $3, $5, $7) }
+  | DEF; VAR; option(univ_annots); telescope; COLON; term; COLONEQ; term; DOT { Commands.Define ($2, $3, $4, $6, $8) }
   | WHD; term; DOT { Commands.Whd $2 }
   | EVAL; term; DOT { Commands.Eval $2 }
 
@@ -59,8 +65,8 @@ app:
   | nonempty_list(sterm) { match $1 with | [] -> Commands.App [] | e :: l -> Commands.mkApp e l }
 
 sterm:
-  | VAR { Commands.Const $1 }
-  | TYPE { Commands.Type (SMap.singleton "" 1) }
-  | PROP { Commands.Type (SMap.singleton "" 0) }
+  | VAR; option(univ_annots) { Commands.Const($1, $2) }
+  | TYPE; option(univ_annot) { Commands.Type $2 }
+  | PROP { Commands.Type (Some "") }
   | LPAR; term; RPAR { $2 }
   | sterm; MK; INT { Commands.Construct ($1, $3) }
