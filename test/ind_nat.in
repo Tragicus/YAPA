@@ -46,3 +46,8 @@ Definition size (T : Type) (l : list T) : nat :=
 	end.
 
 Eval size nat (cons nat zero (cons nat zero (nil nat))).
+
+Definition eq (A : Type) (a : A) : A -> Type :=
+  ind eq : A -> Type | eq a end.
+
+Print eq.
