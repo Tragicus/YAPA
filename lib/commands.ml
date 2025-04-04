@@ -53,9 +53,10 @@ let rec capture_vars ictx ctx t =
     let t = capture_vars ictx ctx t in
     Term.Let (v, ty, t, capture_vars (Utils.SMap.add v (Term.Context.depth ctx) ictx) (Term.Context.push_var (Some v, ty, Some t) ctx) body)
   | Ind (v, a, c) ->
+    let a = capture_vars ictx ctx a in
     let ictx = Utils.SMap.add v (Term.Context.depth ctx) ictx in
     let ctx = Term.Context.push_var (Some v, Term.Var(0), None) ctx in
-    Term.Ind (capture_vars ictx ctx a, List.map (capture_vars ictx ctx) c)
+    Term.Ind (a, List.map (capture_vars ictx ctx) c)
   | Construct (ind, i) -> Term.Construct (capture_vars ictx ctx ind, i)
   | Case (ind, r) -> Term.Case (capture_vars ictx ctx ind, r) 
 
