@@ -115,7 +115,9 @@ let eval ctx = function
     let ctx, tybody = Term.type_of ctx body in
     if not (Term.unify ctx tybody ty)
       then raise (Term.TypeError (ctx, Term.TypeMismatch (ty, body))) else
-    let ctx = Term.Context.push_const v (ctx.univ, ty, body) ctx in
+    let bunivs = Utils.ISet.diff (Utils.IMap.fold (fun u _ s -> Utils.ISet.add u s) ctx.univ Utils.ISet.empty) (Utils.ISet.add 0 (Term.free_univs ty)) in
+    let univ = Utils.ISet.fold Univ.Context.elim bunivs ctx.univ in
+    let ctx = Term.Context.push_const v (univ, ty, body) ctx in
     { ctx with univ = Univ.Context.empty }
   | Whd t ->
     let ctx', t = capture_vars Utils.SMap.empty ctx t in

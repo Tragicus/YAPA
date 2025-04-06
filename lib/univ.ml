@@ -50,6 +50,8 @@ let print u =
   let () = print_string "max(" in
   Utils.print_with_sep ", " Atom.print (IMap.bindings u)
 
+let free_vars u = IMap.fold (fun u _ s -> ISet.add u s) u ISet.empty
+
 type universe_error =
   | LoopAt of int
   | IncompatibleConstraint of t * Atom.t
@@ -94,6 +96,7 @@ module Context = struct
   (* Adds the constraints in g' to the constraints in g. g' is expected to be small in comparison to g. *)
   let add g' g = IMap.union (fun _ c' c -> Some (c @ c')) g' g
 
+  let subst_univ = subst
   (* Substitute every variable appearing in g with the universe given by subst *)
   let subst subst g =
     let addl l = List.fold_left add IMap.empty l in
@@ -123,7 +126,25 @@ module Context = struct
     let i = try fst (IMap.max_binding g) + 1 with _ -> 1 in
     let subst j = if j = 0 then j else j + i in
     let g' = rename subst g' in
-    let newu = List.map fst (List.tl (IMap.bindings g')) in
-    add g' g, newu
+    match List.tl (IMap.bindings g') with
+    | exception _ -> g, []
+    | g'u -> add g' g, List.map fst g'u
+
+  let elim u g =
+    let ucstrs = IMap.find u g in
+    let g = IMap.remove u g in
+    IMap.mapi (fun v vcstrs ->
+      let ucstrs = List.filter_map (fun cstr ->
+        try if 0 < IMap.find v cstr then Some (IMap.remove v cstr) else None
+        with _ -> Some cstr) ucstrs in
+      List.flatten (List.map (fun vcstr ->
+        match IMap.find u vcstr with
+        | exception _ -> [vcstr]
+        | ui ->
+        List.map
+          (fun ucstr ->
+            let ucstr = shift ui ucstr in
+            subst_univ (fun w -> if w = u then ucstr else of_atom w 0) vcstr)
+          ucstrs) vcstrs)) g
 
 end

@@ -240,6 +240,19 @@ let occurs t t' =
     | Case (ind, _) -> aux t ind
   in try aux t t'; false with Not_found -> true
 
+let rec free_univs = function
+  | Var _ -> ISet.empty
+  | Type u -> Univ.free_vars u
+  | Const (u, _) -> List.fold_left ISet.union ISet.empty (List.map Univ.free_vars u)
+  | App l -> List.fold_left ISet.union ISet.empty (List.map free_univs l)
+  | Fun (tele, body) | Pi (tele, body) ->
+    List.fold_left ISet.union (free_univs body) (List.map (fun (_, t) -> free_univs t) tele)
+  | Let (_, ty, t, body) ->
+    ISet.union (ISet.union (free_univs ty) (free_univs t)) (free_univs body)
+  | Ind (a, c) ->
+    List.fold_left ISet.union (free_univs a) (List.map free_univs c)
+  | Construct (ind, _) | Case (ind, _) -> free_univs ind
+
 type whd_flags = {
   beta    : bool;
   delta   : bool;
@@ -328,7 +341,8 @@ and whd ?(flags=whd_flags_all) ctx t =
   | Const (univs, c) when flags.delta ->
     let u = Context.get_const_univ ctx c in
     let t = Context.get_const_body ctx c in
-    let u = List.fold_left (fun g (v, u) -> IMap.add v u g) IMap.empty (List.map2 (fun (v, _) u -> (v, u)) (List.tl (IMap.bindings u)) univs) in
+    let u = try List.tl (IMap.bindings u) with _ -> [] in
+    let u = List.fold_left (fun g (v, u) -> IMap.add v u g) IMap.empty (List.map2 (fun (v, _) u -> (v, u)) u univs) in
     let t = subst (fun i -> Var i) (fun i -> try IMap.find i u with _ -> Univ.of_atom i 0) t in
     if flags.once then t else whd ~flags ctx t
   | Fun ([(_, _)], _) as t when flags.eta -> eta t
