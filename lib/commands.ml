@@ -1,8 +1,13 @@
+type univ=
+  | Var of string
+  | Max of univ list
+  | Shift of univ * int
+
 type term =
   | Const of string
   | Fun of term Term.telescope * term
   | App of term list (* FIXME: slow *)
-  | Type of Univ.t
+  | Type of Univ.t option
   | Pi of term Term.telescope * term
   | Let of string * term * term * term
   | Ind of (* name *) string * (* arity *) term * (* constructors *) term list
@@ -33,32 +38,53 @@ let mkPi f body =
 let rec capture_vars ictx ctx t =
   let capture_tele ictx ctx tele =
     let ictx, ctx, tele = List.fold_left (fun (ictx, ctx, tele) (v, t) ->
-      let t = capture_vars ictx ctx t in
+      let ctx, t = capture_vars ictx ctx t in
       Utils.SMap.add v (Term.Context.depth ctx) ictx, Term.Context.push_var (Some v, t, None) ctx, (v, t) :: tele) (ictx, ctx, []) tele in
     ictx, ctx, List.rev tele in
+  (*let capture_univ = function
+    | Var v -> Univ.of_atom (SMap.find v) 0
+    | Max us ->
+      List.fold_left (fun g u -> Univ.max g (capture_univ u)) IMap.empty us
+    | Shift (u, i) -> Univ.shift i u in *)
   match t with
-  | Type s -> Term.Type s
-  | App l -> Term.App (List.map (capture_vars ictx ctx) l)
+  | Type (Some s) -> ctx, Term.Type s
+  | Type None ->
+    let ctx, u = Term.Context.new_univ ctx in
+    ctx, Term.Type u
+  | App l ->
+    let ctx, l = List.fold_left_map (capture_vars ictx) ctx l in
+    ctx, Term.App l
   | Const c ->
-    (try Var (Term.Context.depth ctx - 1 - Utils.SMap.find c ictx)
-    with _ -> Term.Const c)
+    (try ctx, Var (Term.Context.depth ctx - 1 - Utils.SMap.find c ictx)
+    with _ ->
+    let univ = Term.Context.get_const_univ ctx c in
+    let ctx, newu = Term.Context.new_univs_with_constraints univ ctx in
+    ctx, Term.Const (List.map (fun v -> Univ.of_atom v 0) newu, c))
   | Fun (tele, body) ->
-    let ictx, ctx, tele = capture_tele ictx ctx tele in
-    Term.Fun (tele, capture_vars ictx ctx body)
+    let ictx, ctx', tele = capture_tele ictx ctx tele in
+    let ctx', body = capture_vars ictx ctx' body in
+    { ctx with univ = ctx'.univ }, Term.Fun (tele, body)
   | Pi (tele, body) ->
-    let ictx, ctx, tele = capture_tele ictx ctx tele in
-    Term.Pi (tele, capture_vars ictx ctx body)
+    let ictx, ctx', tele = capture_tele ictx ctx tele in
+    let ctx', body = capture_vars ictx ctx' body in
+    { ctx with univ = ctx'.univ }, Term.Pi (tele, body)
   | Let (v, ty, t, body) ->
-    let ty = capture_vars ictx ctx ty in
-    let t = capture_vars ictx ctx t in
-    Term.Let (v, ty, t, capture_vars (Utils.SMap.add v (Term.Context.depth ctx) ictx) (Term.Context.push_var (Some v, ty, Some t) ctx) body)
+    let ctx, ty = capture_vars ictx ctx ty in
+    let ctx, t = capture_vars ictx ctx t in
+    let ctx', body = capture_vars (Utils.SMap.add v (Term.Context.depth ctx) ictx) (Term.Context.push_var (Some v, ty, Some t) ctx) body in
+    { ctx with univ = ctx'.univ }, Term.Let (v, ty, t, body)
   | Ind (v, a, c) ->
-    let a = capture_vars ictx ctx a in
+    let ctx, a = capture_vars ictx ctx a in
     let ictx = Utils.SMap.add v (Term.Context.depth ctx) ictx in
-    let ctx = Term.Context.push_var (Some v, Term.Var(0), None) ctx in
-    Term.Ind (a, List.map (capture_vars ictx ctx) c)
-  | Construct (ind, i) -> Term.Construct (capture_vars ictx ctx ind, i)
-  | Case (ind, r) -> Term.Case (capture_vars ictx ctx ind, r) 
+    let ctx' = Term.Context.push_var (Some v, Term.Var(0), None) ctx in
+    let ctx', c = List.fold_left_map (capture_vars ictx) ctx' c in
+    { ctx with univ = ctx'.univ }, Term.Ind (a, c)
+  | Construct (ind, i) ->
+    let ctx, ind = capture_vars ictx ctx ind in
+    ctx, Term.Construct (ind, i)
+  | Case (ind, r) ->
+    let ctx, ind = capture_vars ictx ctx ind in
+    ctx, Term.Case (ind, r) 
 
 type t =
   | Print of term
@@ -77,28 +103,31 @@ let eval ctx = function
   | Print _ ->
     failwith "I can only print the body of constants"
   | Check t ->
-    let t = capture_vars Utils.SMap.empty ctx t in
-    let () = Printer.pp_term ctx t; print_string " : " in
-    let () = Printer.pp_term ctx (Term.type_of ctx t) in
-    let () = print_newline () in
+    let ctx', t = capture_vars Utils.SMap.empty ctx t in
+    let () = Printer.pp_term ctx' t; print_string " : " in
+    let ctx', ty = Term.type_of ctx' t in
+    let () = Printer.pp_term ctx' ty in
+    let () = print_string "\n" in
     ctx
   | Define (v, tele, ty, body) ->
-    let ty = capture_vars Utils.SMap.empty ctx (mkPi tele ty) in
-    let body = capture_vars Utils.SMap.empty ctx (mkFun tele body) in
-    if Term.unify ctx (Term.type_of ctx body) ty 
-      then Term.Context.push_const v (ty, body) ctx
-    else raise (Term.TypeError (ctx, Term.TypeMismatch (ty, body)))
+    let ctx, ty = capture_vars Utils.SMap.empty ctx (mkPi tele ty) in
+    let ctx, body = capture_vars Utils.SMap.empty ctx (mkFun tele body) in
+    let ctx, tybody = Term.type_of ctx body in
+    if not (Term.unify ctx tybody ty)
+      then raise (Term.TypeError (ctx, Term.TypeMismatch (ty, body))) else
+    let ctx = Term.Context.push_const v (ctx.univ, ty, body) ctx in
+    { ctx with univ = Univ.Context.empty }
   | Whd t ->
-    let t = capture_vars Utils.SMap.empty ctx t in
-    let () = print_string "whd "; Printer.pp_term ctx t; print_string " := " in
-    let () = Printer.pp_term ctx (Term.whd ctx t) in
+    let ctx', t = capture_vars Utils.SMap.empty ctx t in
+    let () = print_string "whd "; Printer.pp_term ctx' t; print_string " := " in
+    let () = Printer.pp_term ctx' (Term.whd ctx' t) in
     let () = print_newline () in
     ctx
   | Eval t ->
-    let t = capture_vars Utils.SMap.empty ctx t in
-    let () = print_string "eval "; Printer.pp_term ctx t; print_string " := " in
-    let () = Printer.pp_term ctx (Term.eval ctx t) in
+    let ctx', t = capture_vars Utils.SMap.empty ctx t in
+    let () = print_string "eval "; Printer.pp_term ctx' t; print_string " := " in
+    let () = Printer.pp_term ctx' (Term.eval ctx' t) in
     let () = print_newline () in
     ctx
-  | Stop -> ctx
+  | Stop -> failwith "Stop"
 

@@ -6,7 +6,7 @@ type 'a arity = 'a telescope * 'a
 
 type t =
   | Var of int (* De Bruijn indices *)
-  | Const of string
+  | Const of Univ.t list * string
   | Fun of t telescope * t
   | App of t list (* FIXME: slow *)
   | Type of Univ.t
@@ -19,8 +19,9 @@ type t =
 (* Invariant : depth = List.length var *)
 type context = {
   depth : int;
+  univ : Univ.Context.t;
   var : (string option * t * t option) list;
-  const : (t * t) SMap.t
+  const : (Univ.Context.t * t * t) SMap.t
 }
 
 type type_error =
@@ -47,7 +48,7 @@ let destVar = function
   | _ -> raise Not_found
 
 let destConst = function
-  | Const c -> c
+  | Const (u, c) -> (u, c)
   | _ -> raise Not_found
 
 let destFun = function
@@ -109,38 +110,32 @@ let rec print e =
   | Pi (tele, body) -> () ++ "(forall "; pr_telescope tele ++ ", " + body ++ ")"
   | Let (v, ty, t, body) -> () ++ "(let " ++ v ++ " : " + ty ++ " := " + t ++ " in " + body ++ ")"
   | Var v -> () ++ "Var "; print_int v
-  | Const v -> () ++ "Const " ++ v
+  | Const (us, v) -> () ++ "Const " ++ v ++ "@{"; Utils.print_with_sep ", " Univ.print us ++ "}"
   | App (f :: a) ->
     let (+) = fun _ e -> () ++ "(" + e ++ ")" in
     () ++ "App " + f; List.iter (fun e -> () ++ " " + e) a
-  | Type l ->
-    let pr_atom v i =
-      if v = "" then
-        (if i = 0 then
-          () ++ "Prop"
-        else (() ++ "Type@{"; print_int i ++ "}"))
-      else if i = 0 then () ++ v else (() ++ v ++ "+"; print_int i) in
-    if SMap.cardinal l = 1 then
-      let (v, i) = SMap.choose l in pr_atom v i
-    else (() ++ "Type@{max("; SMap.iter (fun v i -> pr_atom v i ++ ", ") l ++ ")")
+  | Type u ->
+    if Univ.isProp u then () ++ "Prop" else
+    () ++ "Type@{"; Univ.print u ++ "}"
   | Ind (arity, constructors) ->
     () ++ "ind" ++ " : " + arity ++ " :="; List.iter (fun t -> () ++ " | " + t) constructors
   | Construct (ind, id) ->
     () ++ "ind.mk(" + ind ++ ")."; print_int id
   | Case (ind, recursive) ->
     () ++ (if recursive then "ind.fix(" else "ind.case(") + ind ++ ")"
-  | _ -> raise (TypeError ({ depth = 0; var = []; const = SMap.empty }, IllFormed e))
+  | _ -> raise (TypeError ({ depth = 0; univ = Univ.Context.empty; var = []; const = SMap.empty }, IllFormed e))
 
 (* Replaces t by \lambda^k. t, avoiding capture *)
-let rec bump k t = if k = 0 then t else subst (fun i -> Var (i + k)) t
+let rec bump k t = if k = 0 then t else subst (fun i -> Var (i + k)) (fun i -> Univ.of_atom i 0) t
 
-(* Replaces every `Var i` in `t` by `f i`, avoiding capture. *)
-and subst f t =
+(* Replaces every `Var i` in `t` by `fvar i`, avoiding capture and `Type u` with `Type (funiv u)`. *)
+and subst fvar funiv t =
   let rec aux k t =
     match t with
     | Var i when i < k -> t
-    | Const _ | Type _ -> t
-    | Var i -> bump k (f (i - k))
+    | Const _ -> t
+    | Type u -> Type (Univ.subst funiv u)
+    | Var i -> bump k (fvar (i - k))
     | App l -> App (List.map (aux k) l)
     | Fun (tele, body) ->
       let k, tele = List.fold_left_map (fun k (v, ty) -> k+1, (v, aux k ty)) k tele in
@@ -156,16 +151,18 @@ and subst f t =
   aux 0 t
 
 (* [beta t t'] beta-reduces (\lambda. t') t *)
-let beta t = subst (fun i -> if i = 0 then t else Var (i-1))
+let beta t = subst (fun i -> if i = 0 then t else Var (i-1)) (fun i -> Univ.of_atom i 0)
 
-let is_ground t = try ignore (subst (fun _ -> raise Not_found) t); true with Not_found -> false
+let is_ground t = try ignore (subst (fun _ -> raise Not_found) (fun i -> Univ.of_atom i 0) t); true with Not_found -> false
 
 module Context = struct
   type t = context
 
-  let empty = { depth = 0; var = []; const = SMap.empty }
+  let empty = { depth = 0; univ = Univ.Context.empty; var = []; const = SMap.empty }
 
   let depth ctx = ctx.depth
+
+  let univ ctx = ctx.univ
 
   let find_var ctx i =
     try List.nth ctx.var i with _ -> raise (TypeError (ctx, UnboundVar i))
@@ -185,28 +182,45 @@ module Context = struct
 
   let var_depth ctx = ctx.depth
 
-  let get_const_type ctx c = fst (find_const ctx c)
-  let get_const_body ctx c = snd (find_const ctx c)
+  let get_const_univ ctx c =
+    let (u, _, _) = find_const ctx c in u
+  let get_const_type ctx c =
+    let (_, t, _) = find_const ctx c in t
+  let get_const_body ctx c =
+    let (_, _, b) = find_const ctx c in b
 
   let push_var (v, ty, body) ctx = { ctx with depth = ctx.depth+1; var = (v, bump 1 ty, Option.map (bump 1) body) :: ctx.var }
 
-  let push_const c (t, ty) ctx = { ctx with const = SMap.add c (subst (fun _ -> raise (TypeError (ctx, NotGround t))) t, ty) ctx.const }
+  let new_univ ctx =
+    let univ, u = Univ.Context.new_univ ctx.univ in
+    { ctx with univ }, u
+
+  let new_univs_with_constraints univs ctx =
+    let univ, newu = Univ.Context.push_ctx univs ctx.univ in
+    { ctx with univ }, newu
+
+  let add_univ_constraints univ ctx =
+    let univ = Univ.Context.add univ ctx.univ in
+    let _ = Univ.Context.satisfiable univ in
+    { ctx with univ }
+
+  let push_const c (u, t, ty) ctx =
+    if not (is_ground t) then raise (TypeError (ctx, NotGround t)) else
+    { ctx with const = SMap.add c (u, t, ty) ctx.const }
 
   let push_telescope tele ctx =
     List.fold_left (fun ctx (v, ty) -> push_var (Some v, ty, None) ctx) ctx tele
 
-  (* Unused?
   let pop_var ctx =
     match ctx.var with
-    | [] -> ctx (* TOTHINK: should I fail? *)
+    | [] -> raise (TypeError (ctx, UnboundVar 0))
     | _ :: var -> { ctx with depth = ctx.depth-1; var }
-  *)
 
   let print ctx =
     print_string "CTX:\n\t Local variables:\n";
     List.iteri (fun i (v, ty, t) -> print_string "\t\t"; print_string (Option.value v ~default:("_" ^ string_of_int i)); print_string " : "; print ty; (match t with | None -> () | Some t -> print_string " := "; print t); print_string "\n") ctx.var;
     print_string "\n\t Global variables:\n";
-    SMap.iter (fun v (ty, body) -> print_string "\t\t"; print_string v; print_string " : "; print ty; print_string " := "; print body; print_string "\n") ctx.const;
+    SMap.iter (fun v (_, ty, body) -> print_string "\t\t"; print_string v; print_string " : "; print ty; print_string " := "; print body; print_string "\n") ctx.const;
     print_string "\n"
 end
 
@@ -301,7 +315,7 @@ let rec iota ?(flags=whd_flags_all) ctx t =
         let args = List.map
           (subst (fun i ->
             if i < iarg then List.nth sargs (iarg-1-i) else
-            if i = iarg then ind else Var(i)))
+            if i = iarg then ind else Var(i)) (fun i -> Univ.of_atom i 0))
           args in
         (mkApp (Case (mkApp ind args, recursive)) (objs @ [List.nth sargs iarg])) :: rargs
       | _ -> rargs) (0, ctx, []) ctele in
@@ -311,8 +325,11 @@ let rec iota ?(flags=whd_flags_all) ctx t =
 
 and whd ?(flags=whd_flags_all) ctx t =
   match t with
-  | Const c when flags.delta ->
+  | Const (univs, c) when flags.delta ->
+    let u = Context.get_const_univ ctx c in
     let t = Context.get_const_body ctx c in
+    let u = List.fold_left (fun g (v, u) -> IMap.add v u g) IMap.empty (List.map2 (fun (v, _) u -> (v, u)) (List.tl (IMap.bindings u)) univs) in
+    let t = subst (fun i -> Var i) (fun i -> try IMap.find i u with _ -> Univ.of_atom i 0) t in
     if flags.once then t else whd ~flags ctx t
   | Fun ([(_, _)], _) as t when flags.eta -> eta t
   | Fun ((v, ty) :: tele, body) when flags.eta ->
@@ -341,7 +358,7 @@ and destArity ?(whd_rty=false) ctx t =
 (* Complete reduction. *)
 let rec eval ctx t =
   match t with
-  | Const c ->
+  | Const (_, c) ->
     (match Context.get_const_body ctx c with
     | exception Not_found -> t
     | t -> eval ctx t)
@@ -415,7 +432,10 @@ let rec unify ctx t1 t2 =
       | Var i1 -> i1 = i2 && List.for_all2 (unify ctx) args1 args2
       | _ -> false) ||
       aux ctx t1 (destApp (mkApp (Context.get_var_body ctx i2) args2))
-    | _, Const c -> aux ctx t1 (destApp (mkApp (Context.get_const_body ctx c) args2))
+    | _, Const (u2, c2) ->
+      (match h1 with
+      | Const (u1, c1) -> c1 = c2 && List.for_all2 (fun u u' -> u = u') u1 u2 && List.for_all2 (unify ctx) args1 args2
+      | _ -> false) || aux ctx t1 (destApp (mkApp (Context.get_const_body ctx c2) args2))
     | h1, Case (ind2, recursive2) ->
       (match h1 with
       | Case (ind1, recursive1) -> recursive1 = recursive2 && unify ctx ind1 ind2
@@ -442,39 +462,54 @@ let rec unify ctx t1 t2 =
 let rec type_of ctx t =
   let type_telescope ?(get_sorts=false) ctx tele =
     List.fold_left_map (fun ctx (v, t) -> 
-      let ty = type_of ctx t in
+      let ctx, ty = type_of ctx t in
       match whd ctx ty with
       | Type s ->
         let ty = if get_sorts then Type s else ty in
         Context.push_var (Some v, t, None) ctx, (v, ty)
       | _ -> raise (TypeError (ctx, NotAType t))) ctx tele in
   match t with
-  | Var i -> (try Context.get_var_type ctx i with _ -> raise (TypeError (ctx, UnboundVar i)))
-  | Const v -> (try Context.get_const_type ctx v with _ -> raise (TypeError (ctx, UnboundConst v)))
-  | Type l -> Type (Univ.shift 1 l)
+  | Var i -> ctx, (try Context.get_var_type ctx i with _ -> raise (TypeError (ctx, UnboundVar i)))
+  | Const (u, c) ->
+    let uctx = try Context.get_const_univ ctx c with _ -> raise (TypeError (ctx, UnboundConst c)) in
+    let nu = List.length u in
+    let uctx = Univ.Context.subst (fun i ->
+      if 0 < i && i <= nu then List.nth u (i-1) else
+      Univ.of_atom i 0) uctx in
+    let ctx = Context.add_univ_constraints uctx ctx in
+    ctx, Context.get_const_type ctx c
+  | Type u -> ctx, Type (Univ.shift 1 u)
   | Fun (tele, body) ->
-    let ctx, _ = type_telescope ctx tele in
-    mkPi tele (type_of ctx body)
+    let ctx', _ = type_telescope ctx tele in
+    let ctx', ty = type_of ctx' body in
+    { ctx with univ = ctx'.univ }, mkPi tele ty
   | Pi (tele, body) ->
-    let ctx, tytele = type_telescope ctx tele in
+    let ctx', tytele = type_telescope ctx tele in
     let sorts = List.map destType (List.map snd tytele) in
+    let ctx', ty = type_of ctx' body in
     let j =
-      try destType (whd ctx (type_of ctx body)) with
-      | Not_found -> raise (TypeError (ctx, NotAType body))  in
+      try destType (whd ctx' ty) with
+      | Not_found -> raise (TypeError (ctx', NotAType body))  in
     (* TOTHINK: Do I really need to reverse the sorts list? *)
-    Type (List.fold_left (fun j i -> Univ.max i j) j (List.rev sorts))
+    { ctx with univ = ctx'.univ }, Type (List.fold_left (fun j i -> Univ.max i j) j (List.rev sorts))
   | App (f :: a) ->
-    List.fold_left (fun ty t ->
+    List.fold_left (fun (ctx, ty) t ->
       match whd ctx ty with
-      | Pi ([], body) -> body
+      | Pi ([], body) -> ctx, body
       | Pi ((_, ty) :: tele, body) ->
-        if unify ctx (type_of ctx t) ty then beta t (mkPi tele body) else raise (TypeError (ctx, TypeMismatch (ty, t)))
+        let ctx, tty = type_of ctx t in
+        if not (unify ctx tty ty) then raise (TypeError (ctx, TypeMismatch (ty, t))) else
+        ctx, beta t (mkPi tele body)
       | _ -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (type_of ctx f) a
-  | Let (v, ty, t, body) -> beta ty (type_of (Context.push_var (Some v, ty, Some t) ctx) body)
+  | Let (v, ty, t, body) ->
+    let ctx, tbody = type_of (Context.push_var (Some v, ty, Some t) ctx) body in
+    Context.pop_var ctx, beta ty tbody
   | Ind (a, c) ->
     (* Check the arity *)
-    let _ = match whd ctx (type_of ctx a) with
-      | Type _ -> ()
+    let ctx = 
+      let ctx, ty = type_of ctx a in
+      match whd ctx ty with
+      | Type _ -> ctx
       | _ -> raise (TypeError (ctx, NotAType a)) in
     (* Make the type of the inductive and push it on the context *)
     let ctx = Context.push_var (None, a, None) ctx in
@@ -499,21 +534,23 @@ let rec type_of ctx t =
           Context.push_var (Some n, t, None) ctx, depth+1) (ctx, depth) tele in
         check_positivity ~strict ~depth:depth ctx body
       | t -> if occurs (Var depth) t then raise Not_found else false in
-    let () = List.iter (fun c ->
-      match type_of ctx c with
+    let ctx = List.fold_left (fun ctx c ->
+      let ctx, ty = type_of ctx c in
+      match ty with
       | Type _ ->
         let b = try check_positivity ctx c with Not_found -> raise (TypeError (ctx, NonPositive c)) in
-        if not b then raise (TypeError (ctx, IllegalConstructorReturnType c))
-      | _ -> raise (TypeError (ctx, NotAType c))) c in
-    a
+        if not b then raise (TypeError (ctx, IllegalConstructorReturnType c)) else
+        ctx
+      | _ -> raise (TypeError (ctx, NotAType c))) ctx c in
+    Context.pop_var ctx, a
   | Construct (ind, i) ->
-    let _ = type_of ctx ind in
+    let ctx, _ = type_of ctx ind in
     let _, c = try destInd (whd ctx ind) with _ -> raise (TypeError (ctx, IllFormed t)) in
     if List.length c <= i then raise (TypeError (ctx, IllFormed t)) else
-    beta ind (List.nth c i)
+    ctx, beta ind (List.nth c i)
   | Case (ind, recursive) ->
     (* Check ind is well-typed *)
-    let _ = type_of ctx ind in
+    let ctx, _ = type_of ctx ind in
     (* Get ind's content *)
     let ind, _ = destApp (whd ctx ind) in
     let (a, c) = try destInd ind with _ -> raise (TypeError (ctx, IllFormed t)) in
@@ -555,7 +592,7 @@ let rec type_of ctx t =
       (ic+1, ("_", arg) :: revtele)) (0, revtele) c in
     let revtele = ("_", mkApp (bump (na+nc+1) ind) (List.init na (fun i -> Var (na-i-1)))) :: revtele in
     let tele = List.rev revtele in
-    mkPi tele (mkApp (Var (na+nc+1)) (List.init (na+1) (fun i -> Var (na-i))))
+    Context.pop_var ctx, mkPi tele (mkApp (Var (na+nc+1)) (List.init (na+1) (fun i -> Var (na-i))))
 
   | _ -> raise (TypeError (ctx, IllFormed t))
 

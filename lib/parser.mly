@@ -18,7 +18,7 @@
 %type <Commands.term> sterm
 
 %{
-  open Utils
+  (*open Utils*)
 
 %}
 
@@ -60,7 +60,7 @@ app:
 
 sterm:
   | VAR { Commands.Const $1 }
-  | TYPE { Commands.Type (SMap.singleton "" 1) }
-  | PROP { Commands.Type (SMap.singleton "" 0) }
+  | TYPE { Commands.Type None }
+  | PROP { Commands.Type (Some (Univ.of_atom 0 0)) }
   | LPAR; term; RPAR { $2 }
   | sterm; MK; INT { Commands.Construct ($1, $3) }
