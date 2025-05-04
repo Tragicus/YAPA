@@ -1,28 +1,31 @@
 open Utils
+open Term.Context.Monad.Notations
 
-let rec pp_term ctx t =
+let rec pp_term t ctx =
   let ( ++ ) = fun _ s -> print_string s in
-  let rec pr_telescope ?(notype=false) ctx = function
-    | [] -> ctx
-    | (v, t) :: args ->
-      let ctx' = Term.Context.push_var (Some v, t, None) ctx in
-      let () = if notype then () ++ " " ++ v else () ++ " (" ++ v ++ " : "; pp_term ctx t ++ ")" in
-      pr_telescope ~notype ctx' args in
+  let pr_telescope ?(notype=false) tele k =
+    Term.Context.Monad.to_imut (Term.Context.Monad.fold_telescope
+      (fun _ (v, t) ->
+        if notype then Term.Context.Monad.ret (() ++ " " ++ v) else
+        let () = () ++ " (" ++ v ++ " : " in
+        let** () = pp_term t in
+        Term.Context.Monad.ret (() ++ ")"))
+      () tele
+      (fun _ -> Term.Context.Monad.to_mut (k ()))) in
   let atomic = function
     | Term.Var _ | Term.Const _ | Term.Type _ | Term.Case (_, _) | Term.Construct (_, _) -> true
     | _ -> false in
   match t with
   | Term.Fun (tele, body) -> () ++ "fun";
-      let ctx = pr_telescope ctx tele in
-      () ++ ", "; pp_term ctx body
+    pr_telescope tele (fun _ -> () ++ ", "; pp_term body) ctx
   | Term.Pi (tele, body) -> () ++ "forall";
-      let ctx = pr_telescope ctx tele in
-      () ++ ", "; pp_term ctx body
-  | Term.Let (v, ty, t, body) -> () ++ "let " ++ v ++ " : "; pp_term ctx ty ++ " := "; pp_term ctx t ++ " in "; pp_term (Term.Context.push_var (Some v, t, None) ctx) body
-  | Term.Var v -> () ++ Term.Context.get_var_name ctx v
+    pr_telescope tele (fun _ -> () ++ ", "; pp_term body) ctx
+  | Term.Let (v, ty, t, body) -> () ++ "let " ++ v ++ " : "; pp_term ty ctx ++ " := "; pp_term t ctx ++ " in ";
+    Term.Context.Monad.to_imut (Term.Context.Monad.with_var (Some v, t, None) (Term.Context.Monad.to_mut (pp_term body))) ctx
+  | Term.Var v -> () ++ Term.Context.get_var_name v ctx
   | Term.Const v -> () ++ v
   | Term.App (f :: a) ->
-    let (+) = fun _ e -> if atomic e then pp_term ctx e else (() ++ "("; pp_term ctx e ++ ")") in
+    let (+) = fun _ e -> if atomic e then pp_term e ctx else (() ++ "("; pp_term e ctx ++ ")") in
     () + f; List.iter (fun e -> () ++ " " + e) a
   | Term.Type l -> let pr_atom v i =
       if v = "" then
@@ -34,32 +37,31 @@ let rec pp_term ctx t =
       let (v, i) = SMap.choose l in pr_atom v i
     else (() ++ "Type@{max("; SMap.iter (fun v i -> pr_atom v i ++ ", ") l ++ ")")
   | Ind (arity, constructors) ->
-    () ++ "ind";
-    (* Dummy type, just for having something in the context. *)
-    let ctx = Term.Context.push_var (None, arity, None) ctx in
-    () ++ " : "; pp_term ctx arity ++ " :="; List.iter (fun t -> () ++ " | "; pp_term ctx t) constructors
+    () ++ "ind" ++ " : "; pp_term arity ctx ++ " :=";
+    Term.Context.Monad.to_imut (Term.Context.Monad.with_var (None, arity, None) (Term.Context.Monad.to_mut (fun ctx ->
+      List.iter (fun t -> () ++ " | "; pp_term t ctx) constructors))) ctx
   | Construct (ind, id) ->
-    (if atomic ind then pp_term ctx ind else (() ++ "("; pp_term ctx ind ++ ")")) ++ ".mk"; print_int id
+    (if atomic ind then pp_term ind ctx else (() ++ "("; pp_term ind ctx ++ ")")) ++ ".mk"; print_int id
   | Case (ind, recursive) ->
-    (if atomic ind then pp_term ctx ind else (() ++ "("; pp_term ctx ind ++ ")")) ++ (if recursive then ".fix" else ".case")
+    (if atomic ind then pp_term ind ctx else (() ++ "("; pp_term ind ctx ++ ")")) ++ (if recursive then ".fix" else ".case")
   | _ -> raise (Term.TypeError (Term.Context.empty, Term.IllFormed t))
 
 let pp_ctx ctx =
   print_string "CTX:\n\t Local variables:\n";
-  List.iteri (fun i (v, ty, t) -> print_string "\t\t"; print_string (Option.value v ~default:("_" ^ string_of_int i)); print_string " : "; pp_term ctx ty; (match t with | None -> () | Some t -> print_string " := "; pp_term ctx t); print_string "\n") ctx.var;
+  List.iteri (fun i (v, ty, t) -> print_string "\t\t"; print_string (Option.value v ~default:("_" ^ string_of_int i)); print_string " : "; pp_term ty ctx; (match t with | None -> () | Some t -> print_string " := "; pp_term t ctx); print_string "\n") ctx.var;
   print_string "\n\t Global variables:\n";
-  SMap.iter (fun v (ty, body) -> print_string "\t\t"; print_string v; print_string " : "; pp_term ctx ty; print_string " := "; pp_term ctx body; print_string "\n") ctx.const;
+  SMap.iter (fun v (ty, body) -> print_string "\t\t"; print_string v; print_string " : "; pp_term ty ctx; print_string " := "; pp_term body ctx; print_string "\n") ctx.const;
   print_string "\n"
 
-let print_type_error ?(debug=false) ctx e =
-  let print = if debug then Term.print else pp_term ctx in
+let print_type_error ?(debug=false) e ctx =
+  let print t = if debug then Term.print t else pp_term t ctx in
   match e with
   | Term.UnboundVar i -> print_string "Unbound variable "; print_int i; print_string "\n"
   | Term.UnboundConst v -> print_string "Unbound constant "; print_string v; print_string "\n"
-  | Term.NotAType t -> print t; print_string " has type "; print (Term.type_of ctx t); print_string ", it is not a type\n"
+  | Term.NotAType t -> print t; print_string " has type "; print (Term.Context.Monad.to_imut (Term.type_of t) ctx); print_string ", it is not a type\n"
   | Term.IllegalApplication t -> print_string "Illegal application in "; print t; print_string "\n"
   | Term.TypeMismatch (ty, t) ->
-    let tyt = try Term.type_of ctx t with e -> if debug then Const "???" else raise e in
+    let tyt = try Term.Context.Monad.to_imut (Term.type_of t) ctx with e -> if debug then Term.Const "???" else raise e in
     print_string "Term "; print t; print_string " has type "; print tyt; print_string " while it is expected to have type "; print ty; print_string "\n"
   | Term.IllFormed t -> print t; print_string " is ill-formed\n"
   | Term.NoBody t -> print t; print_string "has no body\n"
