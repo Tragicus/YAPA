@@ -1,4 +1,4 @@
 module Utils = Utils
-module Term = Term
+module Kernel = Kernel
 module Lexer = Lexer
 module Parser = Parser
