@@ -1,4 +1,4 @@
-open Kernel.Term.Context.Monad.Notations
+open Engine.Term.Context.Monad.Notations
 
 type univ =
   | Var of string
@@ -7,14 +7,20 @@ type univ =
 
 type term =
   | Const of string * string list option
-  | Fun of term Kernel.Term.telescope * term
+  | Fun of term Engine.Term.telescope * term
   | App of term list (* FIXME: slow *)
   | Type of string option
-  | Pi of term Kernel.Term.telescope * term
+  | Pi of term Engine.Term.telescope * term
   | Let of string * term * term * term
   | Ind of (* name *) string * (* arity *) term * (* constructors *) term list
   | Construct of term * int
-  | Case of (* inductive *) term * (* recursive *) bool
+  | Case of (* recursive *) bool *
+            (* subject *) term *
+            (* inductive *) term option *
+            (* return type *) term * 
+            (* branches *) term list
+  | THole
+  | Hole
 
 let destApp = function
   | App (f :: args) -> f, args
@@ -37,125 +43,141 @@ let mkPi f body =
   | Pi (tele, body) -> Pi (f @ tele, body)
   | _ -> Pi (f, body)
 
-let rec capture_vars ictx uctx (t : term) =
+let rec elaborate ?(ictx=Utils.SMap.empty) ?(uctx=Utils.SMap.empty) (t : term) =
   let capture_tele ictx uctx tele k =
     let rec aux ictx uctx tele k revtele =
       match tele with
       | [] -> k ictx uctx (List.rev revtele)
       | (v, t) :: tele ->
-        let* t = capture_vars ictx uctx t in
-        let** depth = Kernel.Term.Context.depth in
+        let* t = elaborate ~ictx ~uctx t in
+        let** depth = Engine.Term.Context.depth in
         let ictx = Utils.SMap.add v depth ictx in
-        Kernel.Term.Context.Monad.with_var (Some v, t, None) (aux ictx uctx tele k ((v, t) :: revtele)) in
+        Engine.Term.Context.Monad.with_var (Some v, t, None) (aux ictx uctx tele k ((v, t) :: revtele)) in
     aux ictx uctx tele k [] in
   match t with
-  | Type (Some s) -> Kernel.Term.Context.Monad.ret (Kernel.Term.Type (if s = "" then Kernel.Univ.of_atom 0 0 else try Utils.SMap.find s uctx with Not_found -> failwith (String.cat "Unkown universe " s)))
-  | Type None -> let+ u = Kernel.Term.Context.new_univ in Kernel.Term.Type u
+  | Type (Some s) -> Engine.Term.Context.Monad.ret (Engine.Term.Type (if s = "" then Kernel.Univ.of_atom 0 0 else try Utils.SMap.find s uctx with Not_found -> failwith (String.cat "Unkown universe " s)))
+  | Type None -> let+ u = Engine.Term.Context.new_univ in Engine.Term.Type u
   | App l ->
-    let+ l = List.fold_left (fun state t -> let* l = state in let+ t = capture_vars ictx uctx t in t :: l) (Kernel.Term.Context.Monad.ret []) l in
-    Kernel.Term.App (List.rev l)
+    let+ l = List.fold_left (fun state t -> let* l = state in let+ t = elaborate ~ictx ~uctx t in t :: l) (Engine.Term.Context.Monad.ret []) l in
+    Engine.Term.App (List.rev l)
   | Const (c, u) ->
     (match Utils.SMap.find c ictx with
     | v ->
       if u <> None then failwith "Local variables do not have universe arguments." else
-      Kernel.Term.Context.Monad.to_mut (
-      let+* depth = Kernel.Term.Context.depth in
-      Kernel.Term.Var (depth - 1 - v))
+      Engine.Term.Context.Monad.to_mut (
+      let+* depth = Engine.Term.Context.depth in
+      Engine.Term.Var (depth - 1 - v))
     | exception _ ->
-    let** univ = Kernel.Term.Context.get_const_univ c in
+    let** univ = Engine.Term.Context.get_const_univ c in
     let+ newu = match u with
       | None ->
-        let+ u = Kernel.Term.Context.new_univs_with_constraints univ in
+        let+ u = Engine.Term.Context.new_univs_with_constraints univ in
         List.map (fun v -> Kernel.Univ.of_atom v 0) u
       | Some u ->
       if List.length u <> fst (Utils.IMap.max_binding univ) then
         failwith (String.cat "Unexpected number of universe argument for conconstant stant " c) else
       let u = List.map (fun u -> try Utils.SMap.find u uctx with Not_found -> failwith (String.cat "Unknown universe variable " u)) u in
-      let+ () = Kernel.Term.Context.add_univ_constraints (Kernel.Univ.Context.subst (fun i -> if i = 0 then Kernel.Univ.static 0 else List.nth u (i-1)) univ) in
+      let+ () = Engine.Term.Context.add_univ_constraints (Kernel.Univ.Context.subst (fun i -> if i = 0 then Kernel.Univ.static 0 else List.nth u (i-1)) univ) in
       u in
-    Kernel.Term.Const (newu, c))
+    Engine.Term.Const (newu, c))
   | Fun (tele, body) ->
-    let+ tele, body = capture_tele ictx uctx tele (fun ictx uctx tele -> let+ t = capture_vars ictx uctx body in tele, t) in
-    Kernel.Term.Fun (tele, body)
+    let+ tele, body = capture_tele ictx uctx tele (fun ictx uctx tele -> let+ t = elaborate ~ictx ~uctx body in tele, t) in
+    Engine.Term.Fun (tele, body)
   | Pi (tele, body) ->
-    let+ tele, body = capture_tele ictx uctx tele (fun ictx uctx tele -> let+ t = capture_vars ictx uctx body in tele, t) in
-    Kernel.Term.Pi (tele, body)
+    let+ tele, body = capture_tele ictx uctx tele (fun ictx uctx tele -> let+ t = elaborate ~ictx ~uctx body in tele, t) in
+    Engine.Term.Pi (tele, body)
   | Let (v, ty, t, body) ->
-    let* ty = capture_vars ictx uctx ty in
-    let* t = capture_vars ictx uctx t in
-    let** depth = Kernel.Term.Context.depth in
+    let* ty = elaborate ~ictx ~uctx ty in
+    let* t = elaborate ~ictx ~uctx t in
+    let** depth = Engine.Term.Context.depth in
     let+ body = 
-      Kernel.Term.Context.Monad.with_var (Some v, ty, Some t) (
-        capture_vars (Utils.SMap.add v depth ictx) uctx body
+      Engine.Term.Context.Monad.with_var (Some v, ty, Some t) (
+        elaborate ~ictx:(Utils.SMap.add v depth ictx) ~uctx body
       ) in
-    Kernel.Term.Let (v, ty, t, body)
+    Engine.Term.Let (v, ty, t, body)
   | Ind (v, a, c) ->
-    let* a = capture_vars ictx uctx a in
-    let** depth = Kernel.Term.Context.depth in
+    let* a = elaborate ~ictx ~uctx a in
+    let** depth = Engine.Term.Context.depth in
     let ictx = Utils.SMap.add v depth ictx in
     let+ c = 
-      Kernel.Term.Context.Monad.with_var (Some v, Kernel.Term.Var(0), None) (
-        let+ l = List.fold_left (fun state t -> let* l = state in let+ t = capture_vars ictx uctx t in t :: l) (Kernel.Term.Context.Monad.ret []) c in
+      Engine.Term.Context.Monad.with_var (Some v, Engine.Term.Var(0), None) (
+        let+ l = List.fold_left (fun state t -> let* l = state in let+ t = elaborate ~ictx ~uctx t in t :: l) (Engine.Term.Context.Monad.ret []) c in
         List.rev l
       ) in
-    Kernel.Term.Ind (a, c)
-  | Construct (ind, i) -> let+ ind = capture_vars ictx uctx ind in Kernel.Term.Construct (ind, i)
-  | Case (ind, r) -> let+ ind = capture_vars ictx uctx ind in Kernel.Term.Case (ind, r) 
+    Engine.Term.Ind (a, c)
+  | Construct (ind, i) -> let+ ind = elaborate ~ictx ~uctx ind in Engine.Term.Construct (ind, i)
+  | Case (r, s, ind, ret, br) ->
+    let* s = elaborate ~ictx ~uctx s in
+    let* ind = match ind with | None -> Engine.Term.type_of s | Some ind -> elaborate ~ictx ~uctx ind in
+    let* ret = elaborate ~ictx ~uctx ret in
+    let* br = Engine.Term.Context.Monad.List.map (elaborate ~ictx ~uctx) br in
+    let+ ind =
+      try 
+        let** whind = Engine.Term.whd ind in
+        let _ =  Engine.Term.destInd whind in
+        Engine.Term.Context.Monad.ret ind
+      with _ -> 
+        let* a = Engine.Term.Context.new_type_evar in
+        let* c = Engine.Term.Context.Monad.List.map (fun _ -> Engine.Term.Context.new_type_evar) br in
+        Engine.Term.Context.Monad.ret (Engine.Term.Ind (a, c)) in
+    Engine.Term.mkApp (Engine.Term.Case (ind, r)) (ret :: br @ [s])
+  | THole -> let+ t = Engine.Term.Context.new_type_evar in t
+  | Hole -> let+ t = Engine.Term.Context.new_evar in t
 
 type t =
   | Print of term
   | Check of term
-  | Define of string * string list option * term Kernel.Term.telescope * term * term
+  | Define of string * string list option * term Engine.Term.telescope * term * term
   | Whd of term
   | Eval of term
   | Stop
 
-let eval : t -> unit Kernel.Term.Context.Monad.t = function
+let eval : t -> unit Engine.Term.Context.Monad.t = function
   | Print (Const (c, _)) ->
-    let** body = Kernel.Term.Context.get_const_body c in
+    let** body = Engine.Term.Context.get_const_body c in
     let () = print_string c; print_string " := " in
-    let** () = Printer.pp_term body in
-    Kernel.Term.Context.Monad.ret (print_newline ())
+    let** () = Printer.Engine.pp_term body in
+    Engine.Term.Context.Monad.ret (print_newline ())
   | Print _ ->
     failwith "I can only print the body of constants"
   | Check t ->
-    let* t = capture_vars Utils.SMap.empty Utils.SMap.empty t in
-    let* ty = Kernel.Term.type_of t in
-    let** () = Printer.pp_term t in
+    let* t = elaborate t in
+    let* ty = Engine.Term.type_of t in
+    let** () = Printer.Engine.pp_term t in
     print_string " : ";
-    let** () = Printer.pp_term ty in
-    fun ctx -> { ctx with Kernel.Term.univ = Kernel.Univ.Context.empty }, (print_string "\n")
+    let** () = Printer.Engine.pp_term ty in
+    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty }, (print_string "\n")
   | Define (v, u, tele, ty, body) ->
-    let** () = fun ctx -> if Kernel.Term.Context.depth ctx <> 0 then let () = Printer.pp_ctx ctx in failwith "nonempty context" else () in
+    let** () = fun ctx -> if Engine.Term.Context.depth ctx <> 0 then let () = Printer.Engine.pp_ctx ctx in failwith "nonempty context" else () in
     let* uctx = match u with
-      | None -> Kernel.Term.Context.Monad.ret (Utils.SMap.empty)
+      | None -> Engine.Term.Context.Monad.ret (Utils.SMap.empty)
       | Some u ->
-      let+ u = Kernel.Term.Context.Monad.List.map (fun v -> let+ u = Kernel.Term.Context.new_univ in (v, u)) u in
+      let+ u = Engine.Term.Context.Monad.List.map (fun v -> let+ u = Engine.Term.Context.new_univ in (v, u)) u in
       List.fold_left (fun uctx (v, u) -> Utils.SMap.add v u uctx) Utils.SMap.empty u in
-    let* ty = capture_vars Utils.SMap.empty uctx (mkPi tele ty) in
-    let* body = capture_vars Utils.SMap.empty uctx (mkFun tele body) in
-    let* tyb = Kernel.Term.type_of body in
-    let* b = Kernel.Term.unify tyb ty in
-    if not b then fun ctx -> raise (Kernel.Term.TypeError (ctx, Kernel.Term.TypeMismatch (ty, body))) else
-    let* body, tyb = Kernel.Term.elim_irrelevant_univs body in 
-    let** univ = fun ctx -> ctx.Kernel.Term.univ in
-    let* () = Kernel.Term.Context.push_const v (univ, tyb, body) in
-    fun ctx -> { ctx with Kernel.Term.univ = Kernel.Univ.Context.empty }, ()
+    let* ty = elaborate ~uctx (mkPi tele ty) in
+    let* body = elaborate ~uctx (mkFun tele body) in
+    let* tyb = Engine.Term.type_of body in
+    let* b = Engine.Term.unify tyb ty in
+    if not b then fun ctx -> raise (Engine.Term.TypeError (ctx, Engine.Term.TypeMismatch (ty, body))) else
+    let* body, tyb = Engine.Term.elim_irrelevant_univs body in 
+    let** univ = fun ctx -> ctx.Engine.Term.univ in
+    let* () = Engine.Term.Context.push_const v (univ, tyb, body) in
+    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty; Engine.Term.evar = Utils.IMap.empty }, ()
   | Whd t ->
-    let* t = capture_vars Utils.SMap.empty Utils.SMap.empty t in
-    let** t' = Kernel.Term.whd t in
+    let* t = elaborate t in
+    let** t' = Engine.Term.whd t in
     let () = print_string "whd " in
-    let** () = Printer.pp_term t in
+    let** () = Printer.Engine.pp_term t in
     let () = print_string " := " in
-    let** () = Printer.pp_term t' in
-    fun ctx -> { ctx with Kernel.Term.univ = Kernel.Univ.Context.empty }, (print_newline ())
+    let** () = Printer.Engine.pp_term t' in
+    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty }, (print_newline ())
   | Eval t ->
-    let* t = capture_vars Utils.SMap.empty Utils.SMap.empty t in
-    let** t' = Kernel.Term.eval t in
+    let* t = elaborate t in
+    let** t' = Engine.Term.eval t in
     let () = print_string "eval " in
-    let** () = Printer.pp_term t in
+    let** () = Printer.Engine.pp_term t in
     let () = print_string " := " in
-    let** () = Printer.pp_term t' in
-    fun ctx -> { ctx with Kernel.Term.univ = Kernel.Univ.Context.empty }, (print_newline ())
+    let** () = Printer.Engine.pp_term t' in
+    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty }, (print_newline ())
   | Stop -> failwith "Stop"
 

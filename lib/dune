@@ -5,4 +5,4 @@
 
 (library
  (name YAPA)
- (libraries Utils Kernel))
+ (libraries Utils Kernel Engine))
