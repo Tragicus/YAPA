@@ -3,7 +3,7 @@ module SSet = Set.Make(String)
 module IMap = Map.Make(Int)
 module ISet = Set.Make(Int)
 
-(* `split_last_at acc i [x_1; ...; x_n]` = `([x_1; ...; x_(i-1)] @ List.rev acc, [x_i; ...; x_n]` *)
+(* `split_last_at acc i [x_0; ...; x_n]` = `([x_0; ...; x_(i-1)] @ List.rev acc, [x_i; ...; x_n]` *)
 let rec split_list_at ?(acc=[]) i l =
   if i = 0 then List.rev acc, l else
   match l with

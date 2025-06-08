@@ -34,9 +34,9 @@ rule token = parse
   | "Eval" { EVAL }
   | "," { COMMA }
   | "." { DOT }
-  | "_" { JOKER }
   | ":" { COLON }
   | ":=" { COLONEQ }
   | '@' { AT }
+  | '_' { HOLE }
   | ['a'-'z' 'A'-'Z'] ['a'-'z' 'A'-'Z' '0'-'9']* as s { VAR s }
   | _  { failwith "lexical error" }

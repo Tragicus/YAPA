@@ -2,7 +2,7 @@
 %token <string> VAR
 %token EOF
 %token LPAR RPAR LCBRACE RCBRACE FUN ARROW
-%token LET IN FORALL TARROW COMMA DOT JOKER COLON COLONEQ AT
+%token LET IN FORALL TARROW COMMA DOT COLON COLONEQ AT HOLE
 %token TYPE PROP
 %token IND PIPE MATCH REC WITH RETURN END MK
 %token PRINT CHECK DEF WHD EVAL
@@ -36,21 +36,28 @@ univ_annots:
 command:
   | PRINT; term; DOT { Commands.Print $2 }
   | CHECK; term; DOT { Commands.Check $2 }
-  | DEF; VAR; option(univ_annots); telescope; COLON; term; COLONEQ; term; DOT { Commands.Define ($2, $3, $4, $6, $8) }
+  | DEF; VAR; option(univ_annots); telescope; option(type_annotation); COLONEQ; term; DOT { Commands.Define ($2, $3, $4, Option.value ~default:Commands.THole $5, $7) }
   | WHD; term; DOT { Commands.Whd $2 }
   | EVAL; term; DOT { Commands.Eval $2 }
+
+type_annotation:
+  | COLON; term { $2 }
+
+match_return:
+  | RETURN; term {$2}
 
 term:
   | FUN; telescope; ARROW; term { Commands.mkFun $2 $4 }
   | FORALL; telescope; COMMA; term { Commands.mkPi $2 $4 }
   | LET; VAR; COLON; term; COLONEQ; term; IN; term { Commands.Let ($2, $4, $6, $8) }
   | IND; VAR; COLON; term; constructors; END { Commands.Ind ($2, $4, $5) }
-  | MATCH; option(REC); term; COLON; term; RETURN; term; WITH; constructors; END { Commands.App ((Commands.Case ($5, $2 <> None)) :: $7 :: $9 @ [$3]) }
+  | MATCH; option(REC); term; option(type_annotation); option(match_return); WITH; constructors; END { (Commands.Case ($2 <> None, $3, $4, Option.value ~default:Commands.Hole $5, $7)) }
   | term; TARROW; term { Commands.mkPi [("_", $1)] $3 }
   | app { $1 }
 
 telescope_elem:
   | LPAR; nonempty_list(VAR); COLON; term; RPAR { List.map (fun x -> (x, $4)) $2 }
+  | VAR { [$1, Commands.THole] }
 
 %inline
 telescope:
@@ -68,5 +75,6 @@ sterm:
   | VAR; option(univ_annots) { Commands.Const($1, $2) }
   | TYPE; option(univ_annot) { Commands.Type $2 }
   | PROP { Commands.Type (Some "") }
+  | HOLE { Commands.Hole }
   | LPAR; term; RPAR { $2 }
   | sterm; MK; INT { Commands.Construct ($1, $3) }

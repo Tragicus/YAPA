@@ -3,27 +3,28 @@ Definition nat : Type :=
 
 Print nat.
 
-Definition zero : nat :=
-	nat.mk 0.
+Definition zero := nat.mk 0.
 
+Check zero.
 Print zero.
 
-Definition succn : nat -> nat :=
-	nat.mk 1.
+Definition succn := nat.mk 1.
 
+Check succn.
 Print succn.
 
-Definition predn (n : nat) : nat :=
+Definition predn n :=
 	match n : nat return fun (n : nat) => nat with
 	| zero
 	| fun (n : nat) => n
 	end.
 
+Check predn.
 Print predn.
 Whd predn (succn (succn zero)).
 
 Definition addn@{u} (n : nat@{u}) : nat@{u} -> nat@{u} :=
-	match rec n : nat return fun (n : nat) => nat -> nat with
+	match rec n return fun (n : nat) => nat -> nat with
 	| fun (m : nat) => m
 	| fun (n : nat) (addn : nat -> nat) (m : nat) => succn (addn m)
 	end.
@@ -37,7 +38,7 @@ Definition list (T : Type) : Type :=
 
 Print list.
 
-Definition nil (T : Type) : list T := (list T).mk 0.
+Definition nil T : list T := (list T).mk 0.
 
 Check nil.
 
