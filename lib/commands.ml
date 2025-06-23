@@ -108,7 +108,7 @@ let rec elaborate ?(ictx=Utils.SMap.empty) ?(uctx=Utils.SMap.empty) (t : term) =
   | Construct (ind, i) -> let+ ind = elaborate ~ictx ~uctx ind in Engine.Term.Construct (ind, i)
   | Case (r, s, ind, ret, br) ->
     let* s = elaborate ~ictx ~uctx s in
-    let* ind = match ind with | None -> Engine.Term.type_of s | Some ind -> elaborate ~ictx ~uctx ind in
+    let* ind = match ind with | None -> Engine.Term.typecheck s | Some ind -> elaborate ~ictx ~uctx ind in
     let* ret = elaborate ~ictx ~uctx ret in
     let* br = Engine.Term.Context.Monad.List.map (elaborate ~ictx ~uctx) br in
     let+ ind =
@@ -142,7 +142,7 @@ let eval : t -> unit Engine.Term.Context.Monad.t = function
     failwith "I can only print the body of constants"
   | Check t ->
     let* t = elaborate t in
-    let* ty = Engine.Term.type_of t in
+    let* ty = Engine.Term.typecheck t in
     let** () = Printer.Engine.pp_term t in
     print_string " : ";
     let** () = Printer.Engine.pp_term ty in
@@ -156,7 +156,7 @@ let eval : t -> unit Engine.Term.Context.Monad.t = function
       List.fold_left (fun uctx (v, u) -> Utils.SMap.add v u uctx) Utils.SMap.empty u in
     let* ty = elaborate ~uctx (mkPi tele ty) in
     let* body = elaborate ~uctx (mkFun tele body) in
-    let* tyb = Engine.Term.type_of body in
+    let* tyb = Engine.Term.typecheck body in
     let* b = Engine.Term.unify tyb ty in
     if not b then fun ctx -> raise (Engine.Term.TypeError (ctx, Engine.Term.TypeMismatch (ty, body))) else
     let* body, tyb = Engine.Term.elim_irrelevant_univs body in 
