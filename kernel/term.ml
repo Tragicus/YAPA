@@ -621,13 +621,13 @@ let rec unify ?(cumulative=Conv) t1 t2 =
     | _, _ -> Context.Monad.ret false in
   aux ~cumulative (destApp t1) (destApp t2)
 
-let rec type_of t =
+let rec typecheck t =
   (* Block reduction until we get the context. *)
   let** () = Context.Monad.iret () in
-  (* let () = print_string "type_of "; print t; print_string "\n" in *)
+  (* let () = print_string "typecheck "; print t; print_string "\n" in *)
   let type_telescope ?(get_sorts=false) tele k =
     Context.Monad.fold_telescope (fun tele (v, t) ->
-      let* ty = type_of t in
+      let* ty = typecheck t in
       let** ty = whd ty in
       match ty with
       | Type s ->
@@ -647,12 +647,12 @@ let rec type_of t =
     subst (fun i -> Var i) (fun i -> if i = 0 then Univ.static 0 else List.nth u (i-1)) ty)
   | Type l -> Context.Monad.ret (Type (Univ.shift 1 l))
   | Fun (tele, body) ->
-    type_telescope tele (fun _ -> let* ty = type_of body in Context.Monad.ret (mkPi tele ty))
+    type_telescope tele (fun _ -> let* ty = typecheck body in Context.Monad.ret (mkPi tele ty))
   | Pi (tele, body) ->
     type_telescope ~get_sorts:true tele (fun tytele ->
     let sorts = List.map destType (List.map snd tytele) in
     let* j =
-      let* ty = type_of body in
+      let* ty = typecheck body in
       let** ty = whd ty in fun ctx ->
       try ctx, destType ty with
       | Not_found -> raise (TypeError (ctx, NotAType body)) in
@@ -665,18 +665,18 @@ let rec type_of t =
       match ty with
       | Pi ([], body) -> Context.Monad.ret body
       | Pi ((_, ty) :: tele, body) ->
-        let* tyt = type_of t in
+        let* tyt = typecheck t in
         let* b = unify ~cumulative:Cumul tyt ty in
         if not b then fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, t))) else
         let** ty = whd ~flags:({ whd_flags_none with beta = true }) (beta t (mkPi tele body)) in
         Context.Monad.ret ty
-      | _ -> fun ctx -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (type_of f) a
+      | _ -> fun ctx -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (typecheck f) a
   | Let (v, ty, t, body) ->
-    let* tbody = Context.Monad.with_var (Some v, ty, Some t) (type_of body) in
+    let* tbody = Context.Monad.with_var (Some v, ty, Some t) (typecheck body) in
     Context.Monad.ret (beta ty tbody)
   | Ind (a, c) ->
     (* Check the arity *)
-    let* tya = type_of a in
+    let* tya = typecheck a in
     let** tya = whd tya in
     let** _ = fun ctx -> match tya with
       | Type _ -> ()
@@ -709,7 +709,7 @@ let rec type_of t =
       | t -> if occurs (Var depth) t then raise Not_found else Context.Monad.iret false in
     let* () = List.fold_left (fun state c ->
       let* () = state in
-      let* tyc = type_of c in
+      let* tyc = typecheck c in
       let** tyc = whd tyc in
       let** _ = match tyc with Type _ -> Context.Monad.iret () | _ -> fun ctx -> raise (TypeError (ctx, NotAType c)) in
       let** b = fun ctx -> try check_positivity c ctx with Not_found -> raise (TypeError (ctx, NonPositive c)) in
@@ -718,14 +718,14 @@ let rec type_of t =
     Context.Monad.ret a)
   | Construct (ind, i) ->
     (* Check ind is well-typed *)
-    let* _ = type_of ind in
+    let* _ = typecheck ind in
     let** ind' = whd ind in
     let** _, c = fun ctx -> try destInd ind' with _ -> raise (TypeError (ctx, IllFormed t)) in
     if List.length c <= i then fun ctx -> raise (TypeError (ctx, IllFormed t)) else
     Context.Monad.ret (beta ind (List.nth c i))
   | Case (ind', recursive) ->
     (* Check ind is well-typed *)
-    let* _ = type_of ind' in
+    let* _ = typecheck ind' in
     (* Get ind's content *)
     let** ind = whd ind' in
     let ind, _ = destApp ind in
@@ -786,7 +786,7 @@ let elim_irrelevant_univs body =
     let body = subst (fun i -> Var i) renaming body in
     let univ = Univ.Context.subst renaming univ in
     fun ctx -> {ctx with univ = univ}, body in
-  let* ty = type_of body in
+  let* ty = typecheck body in
   let funivs = Utils.ISet.add 0 (free_univs ty) in
   let tunivs = Utils.IMap.fold (fun u _ s -> Utils.ISet.add u s) univ Utils.ISet.empty in
   let bunivs = Utils.ISet.diff tunivs funivs in

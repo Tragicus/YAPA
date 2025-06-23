@@ -50,7 +50,7 @@ term:
   | FUN; telescope; ARROW; term { Commands.mkFun $2 $4 }
   | FORALL; telescope; COMMA; term { Commands.mkPi $2 $4 }
   | LET; VAR; COLON; term; COLONEQ; term; IN; term { Commands.Let ($2, $4, $6, $8) }
-  | IND; VAR; COLON; term; constructors; END { Commands.Ind ($2, $4, $5) }
+  | IND; VAR; option(type_annotation); constructors; END { Commands.Ind ($2, Option.value ~default:Commands.THole $3, $4) }
   | MATCH; option(REC); term; option(type_annotation); option(match_return); WITH; constructors; END { (Commands.Case ($2 <> None, $3, $4, Option.value ~default:Commands.Hole $5, $7)) }
   | term; TARROW; term { Commands.mkPi [("_", $1)] $3 }
   | app { $1 }

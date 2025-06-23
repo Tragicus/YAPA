@@ -57,10 +57,10 @@ module Kernel = struct
     match e with
     | Term.UnboundVar i -> print_string "Unbound variable "; print_int i; print_string "\n"
     | Term.UnboundConst v -> print_string "Unbound constant "; print_string v; print_string "\n"
-    | Term.NotAType t -> print t; print_string " has type "; print (Term.Context.Monad.to_imut (Term.type_of t) ctx); print_string ", it is not a type\n"
+    | Term.NotAType t -> print t; print_string " has type "; print (Term.Context.Monad.to_imut (Term.typecheck t) ctx); print_string ", it is not a type\n"
     | Term.IllegalApplication t -> print_string "Illegal application in "; print t; print_string "\n"
     | Term.TypeMismatch (ty, t) ->
-      let tyt = try Term.Context.Monad.to_imut (Term.type_of t) ctx with e -> if debug then Term.Const ([], "???") else raise e in
+      let tyt = try Term.Context.Monad.to_imut (Term.typecheck t) ctx with e -> if debug then Term.Const ([], "???") else raise e in
       print_string "Term "; print t; print_string " has type "; print tyt; print_string " while it is expected to have type "; print ty; print_string "\n"
     | Term.IllFormed t -> print t; print_string " is ill-formed\n"
     | Term.NoBody t -> print t; print_string "has no body\n"
@@ -135,10 +135,10 @@ module Engine = struct
     | Term.UnboundVar i -> print_string "Unbound variable "; print_int i; print_string "\n"
     | Term.UnboundConst v -> print_string "Unbound constant "; print_string v; print_string "\n"
     | Term.UnboundEvar v -> print_string "Unbound evar "; print_int v; print_string "\n"
-    | Term.NotAType t -> print t; print_string " has type "; print (Term.Context.Monad.to_imut (Term.type_of t) ctx); print_string ", it is not a type\n"
+    | Term.NotAType t -> print t; print_string " has type "; print (Term.Context.Monad.to_imut (Term.typecheck t) ctx); print_string ", it is not a type\n"
     | Term.IllegalApplication t -> print_string "Illegal application in "; print t; print_string "\n"
     | Term.TypeMismatch (ty, t) ->
-      let tyt = try Term.Context.Monad.to_imut (Term.type_of t) ctx with e -> if debug then Term.Const ([], "???") else raise e in
+      let tyt = try Term.Context.Monad.to_imut (Term.typecheck t) ctx with e -> if debug then Term.Const ([], "???") else raise e in
       print_string "Term "; print t; print_string " has type "; print tyt; print_string " while it is expected to have type "; print ty; print_string "\n"
     | Term.IllFormed t -> print t; print_string " is ill-formed\n"
     | Term.NoBody t -> print t; print_string "has no body\n"

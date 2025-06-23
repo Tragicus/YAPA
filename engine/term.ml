@@ -512,6 +512,117 @@ and destArity ?(whd_rty=false) t =
     Context.Monad.ret (tele @ tele2, r)))
   | t' -> Context.Monad.iret ([], if whd_rty then t' else t)
 
+(* [type_of t] returns the type of [t], assuming that [t] is well-typed. In particular, no verification is performed besides those
+  that are required to build the type of [t]. *)
+let rec type_of t =
+  (* Block reduction until we get the context. *)
+  let** () = Context.Monad.iret () in
+  (* let () = print_string "type_of "; print t; print_string "\n" in *)
+  let type_telescope ?(get_sorts=false) tele k =
+    Context.Monad.fold_telescope (fun tele (v, t) ->
+      let* ty = type_of t in
+      let** ty = whd ty in
+      match ty with
+      | Type s ->
+        let ty = if get_sorts then Type s else ty in
+        Context.Monad.ret ((v, ty) :: tele)
+      | _ -> fun ctx -> raise (TypeError (ctx, NotAType t))) [] tele (fun tele -> k (List.rev tele)) in
+  match t with
+  | Var i -> Context.Monad.to_mut (Context.get_var_type i)
+  | Const (u, c) ->
+    let** uctx = Context.get_const_univ c in
+    let nu = List.length u in
+    let uctx = Kernel.Univ.Context.subst (fun i ->
+      if 0 < i && i <= nu then List.nth u (i-1) else
+      Kernel.Univ.of_atom i 0) uctx in
+    let* () = Context.add_univ_constraints uctx in
+    let** ty = Context.get_const_type c in
+    Context.Monad.ret (subst (fun i -> Var i) (fun i -> if i = 0 then Kernel.Univ.static 0 else List.nth u (i-1)) ty)
+  | Type l -> Context.Monad.ret (Type (Kernel.Univ.shift 1 l))
+  | Fun (tele, body) -> let+ ty = type_of body in mkPi tele ty
+  | Pi (tele, body) ->
+    type_telescope ~get_sorts:true tele (fun tytele ->
+    let sorts = List.map destType (List.map snd tytele) in
+    let* j =
+      let* ty = type_of body in
+      let** ty = whd ty in fun ctx ->
+      try ctx, destType ty with
+      | Not_found -> raise (TypeError (ctx, NotAType body)) in
+    (* TOTHINK: Do I really need to reverse the sorts list? *)
+    Context.Monad.ret (Type (List.fold_left (fun j i -> Kernel.Univ.max i j) j (List.rev sorts))))
+  | App (f :: a) ->
+    List.fold_left (fun ty t ->
+      let* ty = ty in
+      let** ty = whd ty in
+      match ty with
+      | Pi (_ :: tele, body) ->
+        let** ty = whd ~flags:({ whd_flags_none with beta = true }) (beta t (mkPi tele body)) in
+        Context.Monad.ret ty
+      | _ -> fun ctx -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (type_of f) a
+  | Let (v, ty, t, body) ->
+    let* tbody = Context.Monad.with_var (Some v, ty, Some t) (type_of body) in
+    Context.Monad.ret (beta ty tbody)
+  | Ind (a, _) -> Context.Monad.ret a
+  | Construct (ind, i) ->
+    let** ind' = whd ind in
+    let** _, c = fun ctx -> try destInd ind' with _ -> raise (TypeError (ctx, IllFormed t)) in
+    if List.length c <= i then fun ctx -> raise (TypeError (ctx, IllFormed t)) else
+    Context.Monad.ret (beta ind (List.nth c i))
+  | Case (ind', recursive) ->
+    (* Get ind's content *)
+    let** ind = whd ind' in
+    let ind, _ = destApp ind in
+    let** (a, c) = fun ctx -> try destInd ind with _ -> raise (TypeError (ctx, IllFormed t)) in
+    (* Get a's arity *)
+    let** atele, asort = destArity a in
+    let** asort = fun ctx -> try destType asort with _ -> raise (TypeError (ctx, NotAType ind')) in
+    let na = List.length atele in
+    let* runiv = Context.new_univ in
+    let* () = Context.add_univ_constraint runiv asort in
+    (* Build the predicate that gives the return type of the match... *)
+    let rty = mkPi (atele @ [("_", mkApp ind' (List.init na (fun i -> Var (na-i-1))))]) (Type runiv) in
+    (* Start building the result's telescope, in reverse order *)
+    let revtele = [("_", rty)] in
+    (* The constructors expect the inductive type to be at position 0 in the context. *)
+    Context.Monad.with_var (None, a, None) (
+    (* Transform the constructors into match branches and push them on the telscope
+     ic : number of constructors already seen, every DeBruijn index should be bumped by ic before being pushed on the telescope.*)
+    let** nc, revtele = List.fold_left (fun state c ->
+      let** ic, revtele = state in
+      let** ctele, cret = destArity ~whd_rty:true c in
+      let nc = List.length ctele in
+      (* Get the recursive calls telescope (if applicable) *)
+      let* rec_calls =
+        if not recursive then Context.Monad.ret [] else
+        Context.Monad.fold_telescope
+        (fun (iarg, rec_calls) (_, arg) ->
+          let** arg = whd arg in
+          let hd, args = destApp arg in
+          Context.Monad.ret (iarg+1,
+            match hd with
+            | Var i when i = iarg ->
+              let args = List.map (bump (nc-iarg)) args in
+              let args = args @ [Var (nc-iarg-1)] in
+              ("_", (mkApp (Var nc) args)) :: rec_calls
+          | _ -> rec_calls))
+        (0, []) ctele
+        (fun (_, rec_calls) -> Context.Monad.ret (List.rev rec_calls)) in
+      (* We need to bump because there is the predicate between the arguments the constructors might refer to and the constructors themselves. *)
+      let ctele, cret = destPi (bump 1 (beta ind' (mkPi ctele cret))) in
+      let ctele = ctele @ rec_calls in
+      let _, cargs = destApp cret in
+      let arg = mkPi ctele (bump (List.length rec_calls) (mkApp (Var nc) (cargs @ [mkApp (Construct (cret, ic)) (List.init nc (fun i -> Var (nc-1-i)))]))) in
+      let arg = bump ic arg in
+      Context.Monad.iret (ic+1, ("_", arg) :: revtele)) (Context.Monad.iret (0, revtele)) c in
+    let revtele = ("_", mkApp (bump (na+nc+1) ind') (List.init na (fun i -> Var (na-i-1)))) :: revtele in
+    let tele = List.rev revtele in
+    let ty = mkPi tele (mkApp (Var (na+nc+1)) (List.init (na+1) (fun i -> Var (na-i)))) in
+    Context.Monad.ret ty)
+
+  | Evar (i, _) -> Context.Monad.to_mut (Context.get_evar_type i)
+
+  | _ -> fun ctx -> raise (TypeError (ctx, IllFormed t))
+
 (* [instantiate_evar ev t] asserts that [ev] is of the form [(Evar i ictx) args] and defines the body of evar [i] with [t], capturing the subterms of [t] that appear in [args] or in [ictx].
     Heuristc: When there are several ways to capture subterms, we capture the largests first and then from the last argument to the first argument and then from the last element of the context to the first. *)
   let instantiate_evar ev t =
@@ -777,13 +888,13 @@ let rec unify ?(cumulative=Conv) t1 t2 =
     | _, _ -> Context.Monad.ret false in
   aux ~cumulative (destApp t1) (destApp t2)
 
-let rec type_of t =
+let rec typecheck t =
   (* Block reduction until we get the context. *)
   let** () = Context.Monad.iret () in
-  (* let () = print_string "type_of "; print t; print_string "\n" in *)
+  (* let () = print_string "typecheck "; print t; print_string "\n" in *)
   let type_telescope ?(get_sorts=false) tele k =
     Context.Monad.fold_telescope (fun tele (v, t) ->
-      let* ty = type_of t in
+      let* ty = typecheck t in
       let** ty = whd ty in
       match ty with
       | Type s ->
@@ -792,23 +903,15 @@ let rec type_of t =
       | _ -> fun ctx -> raise (TypeError (ctx, NotAType t))) [] tele (fun tele -> k (List.rev tele)) in
   match t with
   | Var i -> Context.Monad.to_mut (Context.get_var_type i)
-  | Const (u, c) ->
-    let** uctx = Context.get_const_univ c in
-    let nu = List.length u in
-    let uctx = Kernel.Univ.Context.subst (fun i ->
-      if 0 < i && i <= nu then List.nth u (i-1) else
-      Kernel.Univ.of_atom i 0) uctx in
-    let* () = Context.add_univ_constraints uctx in
-    Context.Monad.to_mut (let+* ty = Context.get_const_type c in
-    subst (fun i -> Var i) (fun i -> if i = 0 then Kernel.Univ.static 0 else List.nth u (i-1)) ty)
+  | Const (_, _) -> type_of t
   | Type l -> Context.Monad.ret (Type (Kernel.Univ.shift 1 l))
   | Fun (tele, body) ->
-    type_telescope tele (fun _ -> let* ty = type_of body in Context.Monad.ret (mkPi tele ty))
+    type_telescope tele (fun _ -> let* ty = typecheck body in Context.Monad.ret (mkPi tele ty))
   | Pi (tele, body) ->
     type_telescope ~get_sorts:true tele (fun tytele ->
     let sorts = List.map destType (List.map snd tytele) in
     let* j =
-      let* ty = type_of body in
+      let* ty = typecheck body in
       let** ty = whd ty in fun ctx ->
       try ctx, destType ty with
       | Not_found -> raise (TypeError (ctx, NotAType body)) in
@@ -821,18 +924,18 @@ let rec type_of t =
       match ty with
       | Pi ([], body) -> Context.Monad.ret body
       | Pi ((_, ty) :: tele, body) ->
-        let* tyt = type_of t in
+        let* tyt = typecheck t in
         let* b = unify ~cumulative:Cumul tyt ty in
         if not b then fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, t))) else
         let** ty = whd ~flags:({ whd_flags_none with beta = true }) (beta t (mkPi tele body)) in
         Context.Monad.ret ty
-      | _ -> fun ctx -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (type_of f) a
+      | _ -> fun ctx -> raise (TypeError (ctx, IllegalApplication (App (f :: a))))) (typecheck f) a
   | Let (v, ty, t, body) ->
-    let* tbody = Context.Monad.with_var (Some v, ty, Some t) (type_of body) in
+    let* tbody = Context.Monad.with_var (Some v, ty, Some t) (typecheck body) in
     Context.Monad.ret (beta ty tbody)
   | Ind (a, c) ->
     (* Check the arity *)
-    let* tya = type_of a in
+    let* tya = typecheck a in
     let** tya = whd tya in
     let** _ = fun ctx -> match tya with
       | Type _ -> ()
@@ -865,72 +968,21 @@ let rec type_of t =
       | t -> if occurs (Var depth) t then raise Not_found else Context.Monad.iret false in
     let* () = List.fold_left (fun state c ->
       let* () = state in
-      let* tyc = type_of c in
+      let* tyc = typecheck c in
       let** tyc = whd tyc in
       let** _ = match tyc with Type _ -> Context.Monad.iret () | _ -> fun ctx -> raise (TypeError (ctx, NotAType c)) in
       let** b = fun ctx -> try check_positivity c ctx with Not_found -> raise (TypeError (ctx, NonPositive c)) in
       if b then Context.Monad.ret ()
       else fun ctx -> raise (TypeError (ctx, IllegalConstructorReturnType c))) (Context.Monad.ret ()) c in
     Context.Monad.ret a)
-  | Construct (ind, i) ->
+  | Construct (ind, _) ->
     (* Check ind is well-typed *)
-    let* _ = type_of ind in
-    let** ind' = whd ind in
-    let** _, c = fun ctx -> try destInd ind' with _ -> raise (TypeError (ctx, IllFormed t)) in
-    if List.length c <= i then fun ctx -> raise (TypeError (ctx, IllFormed t)) else
-    Context.Monad.ret (beta ind (List.nth c i))
-  | Case (ind', recursive) ->
+    let* _ = typecheck ind in
+    type_of t
+  | Case (ind, _) ->
     (* Check ind is well-typed *)
-    let* _ = type_of ind' in
-    (* Get ind's content *)
-    let** ind = whd ind' in
-    let ind, _ = destApp ind in
-    let** (a, c) = fun ctx -> try destInd ind with _ -> raise (TypeError (ctx, IllFormed t)) in
-    (* Get a's arity *)
-    let** atele, asort = destArity a in
-    let** asort = fun ctx -> try destType asort with _ -> raise (TypeError (ctx, NotAType ind')) in
-    let na = List.length atele in
-    let* runiv = Context.new_univ in
-    let* () = Context.add_univ_constraint runiv asort in
-    (* Build the predicate that gives the return type of the match... *)
-    let rty = mkPi (atele @ [("_", mkApp ind' (List.init na (fun i -> Var (na-i-1))))]) (Type runiv) in
-    (* Start building the result's telescope, in reverse order *)
-    let revtele = [("_", rty)] in
-    (* The constructors expect the inductive type to be at position 0 in the context. *)
-    Context.Monad.with_var (None, a, None) (
-    (* Transform the constructors into match branches and push them on the telscope
-     ic : number of constructors already seen, every DeBruijn index should be bumped by ic before being pushed on the telescope.*)
-    let** nc, revtele = List.fold_left (fun state c ->
-      let** ic, revtele = state in
-      let** ctele, cret = destArity ~whd_rty:true c in
-      let nc = List.length ctele in
-      (* Get the recursive calls telescope (if applicable) *)
-      let* rec_calls =
-        if not recursive then Context.Monad.ret [] else
-        Context.Monad.fold_telescope
-        (fun (iarg, rec_calls) (_, arg) ->
-          let** arg = whd arg in
-          let hd, args = destApp arg in
-          Context.Monad.ret (iarg+1,
-            match hd with
-            | Var i when i = iarg ->
-              let args = List.map (bump (nc-iarg)) args in
-              let args = args @ [Var (nc-iarg-1)] in
-              ("_", (mkApp (Var nc) args)) :: rec_calls
-          | _ -> rec_calls))
-        (0, []) ctele
-        (fun (_, rec_calls) -> Context.Monad.ret (List.rev rec_calls)) in
-      (* We need to bump because there is the predicate between the arguments the constructors might refer to and the constructors themselves. *)
-      let ctele, cret = destPi (bump 1 (beta ind' (mkPi ctele cret))) in
-      let ctele = ctele @ rec_calls in
-      let _, cargs = destApp cret in
-      let arg = mkPi ctele (bump (List.length rec_calls) (mkApp (Var nc) (cargs @ [mkApp (Construct (cret, ic)) (List.init nc (fun i -> Var (nc-1-i)))]))) in
-      let arg = bump ic arg in
-      Context.Monad.iret (ic+1, ("_", arg) :: revtele)) (Context.Monad.iret (0, revtele)) c in
-    let revtele = ("_", mkApp (bump (na+nc+1) ind') (List.init na (fun i -> Var (na-i-1)))) :: revtele in
-    let tele = List.rev revtele in
-    let ty = mkPi tele (mkApp (Var (na+nc+1)) (List.init (na+1) (fun i -> Var (na-i)))) in
-    Context.Monad.ret ty)
+    let* _ = typecheck ind in
+    type_of t
 
   | Evar (i, _) -> Context.Monad.to_mut (Context.get_evar_type i)
 
@@ -978,7 +1030,7 @@ let elim_irrelevant_univs body =
     let body = subst (fun i -> Var i) renaming body in
     let univ = Kernel.Univ.Context.subst renaming univ in
     fun ctx -> {ctx with univ = univ}, body in
-  let* ty = type_of body in
+  let* ty = typecheck body in
   let funivs = Utils.ISet.add 0 (free_univs ty) in
   let tunivs = Utils.IMap.fold (fun u _ s -> Utils.ISet.add u s) univ Utils.ISet.empty in
   let bunivs = Utils.ISet.diff tunivs funivs in
