@@ -1,173 +1,172 @@
-use crate::term::*;
+use crate::kernel::univ::*;
+use crate::engine::term::*;
+use crate::command::*;
 use std::rc::Rc;
-use std::iter::Peekable;
-use std::str::Chars;
+use std::collections::VecDeque;
+use std::collections::HashMap;
+use std::vec::Vec;
+use pest::Parser;
+use pest_derive::Parser;
+use pest::error::Error;
+use pest::iterators::Pair;
 
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-    Var(String),
-    Lambda,
-    Dot,
-    Comma,
-    Colon,
-    Arrow,
-    Pi,
-    LParen,
-    RParen,
-    Type,
-    Prop,
-}
+#[derive(Parser)]
+#[grammar = "parser.pest"]
+struct YapaParser;
 
-struct Lexer<'a> {
-    input: Peekable<Chars<'a>>,
-}
-
-impl<'a> Lexer<'a> {
-    fn new(input: &'a str) -> Self {
-        Lexer {
-            input: input.chars().peekable(),
-        }
-    }
-}
-
-impl<'a> Iterator for Lexer<'a> {
-    type Item = Token;
-
-    fn next(&mut self) -> Option<Token> {
-        while let Some(ch) = self.input.next() {
-            return match ch {
-                '.' => { Some(Token::Dot) },
-                ',' => { Some(Token::Comma) },
-                ':' => { Some(Token::Colon) },
-                '-' => {
-                    if self.input.peek() == Some(&'>') {
-                        self.input.next();
-                        Some(Token::Arrow)
-                    } else {
-                        None //Should we panic?
-                    }
-                },
-                '(' => { Some(Token::LParen) },
-                ')' => { Some(Token::RParen) },
-                c if c.is_whitespace() => { continue },
-                'T' if self.input.clone().take(3).collect::<String>() == "ype" => {
-                    self.input.next(); // Consume "ype"
-                    self.input.next(); // Consume "ype"
-                    self.input.next(); // Consume "ype"
-                    Some(Token::Type)
-                }
-                'P' if self.input.clone().take(3).collect::<String>() == "rop" => {
-                    self.input.next(); // Consume "rop"
-                    self.input.next(); // Consume "rop"
-                    self.input.next(); // Consume "rop"
-                    Some(Token::Prop)
-                }
-                'f' if self.input.clone().take(2).collect::<String>() == "un" => {
-                    self.input.next(); // Consume "un"
-                    self.input.next(); // Consume "un"
-                    Some(Token::Lambda)
-                }
-                'f' if self.input.clone().take(5).collect::<String>() == "orall" => {
-                    self.input.next(); // Consume "orall"
-                    self.input.next(); // Consume "orall"
-                    self.input.next(); // Consume "orall"
-                    self.input.next(); // Consume "orall"
-                    self.input.next(); // Consume "orall"
-                    Some(Token::Pi)
-                }
-                c if c.is_alphanumeric() => {
-                    let ident: String = c.to_string() + &self.input.by_ref().take_while(|ch| ch.is_alphanumeric()).collect::<String>();
-                    Some(Token::Var(ident))
-                },
-                _ => { self.input.next(); None },
-            };
-        }
-        None
-    }
-}
-
-pub fn parse<'a>(input: &'a str) -> Result<Term, String> {
-    parse_term(&mut Lexer::new(input).peekable())
-}
-
-/* Parser the longest possible string of input as a term. */
-fn parse_term<'a>(lex: &mut Peekable<Lexer<'a>>) -> Result<Term, String> {
-    let t = parse_atom(lex)?;
-    match lex.peek() {
-        Some(Token::Arrow) => {
-            lex.next();
-            Ok(Term::Pi("_".to_string(), Rc::new(t), Box::new(parse_term(lex)?)))
-        }
-        Some(Token::Colon) => {
-            lex.next();
-            parse_term(lex)?;
-            Ok(t) //TODO: add a case for casts.
-        }
-        _ => {
-            match parse_term(lex) {
-                Ok(u) => Ok(t.mk_app(u)),
-                _ => Ok(t)
+fn capture_vars(t: Term) -> Term {
+    fn fold_map_tele<'a, I>(ctx: &mut HashMap<String, Vec<usize>>, i: usize, mut tele: I, body: Term) -> (Telescope, Term)
+        where I: Iterator<Item = Binder> {
+        let x = tele.next();
+        match x {
+            None => (Telescope::new(), aux(ctx, i, body)),
+            Some((v, ty, b)) => {
+                let ty = aux(ctx, i, ty);
+                let b = b.map(|b| aux(ctx, i, b));
+                match ctx.get_mut(&v) {
+                    None => { ctx.insert(v.clone(), vec![i]); },
+                    Some(bds) => bds.push(i)
+                };
+                let (mut tele, body) = fold_map_tele(ctx, i+1, tele, body);
+                let bds = ctx.get_mut(&v).unwrap();
+                if bds.len() == 1 { ctx.remove(&v); } else { bds.pop(); };
+                tele.push_front((v, ty, b));
+                (tele, body)
             }
         }
     }
-}
 
-/* Parser the shortest possible string of input as a term. */
-fn parse_atom<'a>(lex: &mut Peekable<Lexer<'a>>) -> Result<Term, String> {
-    match lex.peek() {
-        Some(Token::Var(s)) => {
-            let s = s.clone();
-            lex.next();
-            Ok(Term::Var(s))
-        }
-        Some(Token::Lambda) => {
-            lex.next();
-            if let Term::Pi(v, ty, body) = parse_pi(lex)? {
-                Ok(Term::Lambda(v, ty, body))
-            } else {
-                panic!("Unexpected return of `parse_lambda`.")
-            }
-        }
-        Some(Token::Pi) => {
-            lex.next();
-            parse_pi(lex)
-        }
-        Some(Token::LParen) => {
-            lex.next();
-            let t = parse_term(lex);
-            if lex.peek() == Some(&Token::RParen) {
-                lex.next();
+    fn aux(ctx: &mut HashMap<String, Vec<usize>>, i: usize, t: Term) -> Term {
+        match t {
+            Term::Var(_) | Term::Type(_) | Term::Hole(_) => t,
+            Term::Const(c) => {
+                let t = ctx.get(&c).map_or(Term::Const(c.clone()), |bds| Term::Var(i - bds[bds.len()-1] - 1));
+                println!("{} -> {}", c, t);
                 t
-            } else {
-                Err(format!("Expected closing parenthesis, got {:?}", lex.peek()).to_string())
+            }
+            Term::App(args) => Term::App(args.into_iter().map(|t| aux(ctx, i, Rc::unwrap_or_clone(t)).into()).collect()),
+            Term::Fun(forall, tele, body) => {
+                let (tele, body) = fold_map_tele(ctx, i, tele.into_iter(), Rc::unwrap_or_clone(body));
+                Term::Fun(forall, tele, body.into())
             }
         }
-        Some(Token::Type) => {
-            lex.next();
-            Ok(Term::Type(0)) //I need a fresh universe here.
+    }
+
+    aux(&mut HashMap::new(), 0, t)
+}
+
+fn parse_command(pair:Pair<Rule>) -> Command {
+    match pair.as_rule() {
+        Rule::print => Command::Print(capture_vars(parse_term(pair.into_inner().next().unwrap()))),
+        Rule::check => Command::Check(capture_vars(parse_term(pair.into_inner().next().unwrap()))),
+        Rule::define => {
+            let mut inner_rules = pair.into_inner();
+            let name = inner_rules.next().unwrap().as_str().to_string();
+            let ty = parse_type_annot(inner_rules.next().unwrap());
+            let t = capture_vars(parse_term(inner_rules.next().unwrap()));
+            Command::Define(name, ty, t)
         }
-        _ => Err(format!("Unexpected token {:?}", lex.peek()).to_string()),
+        Rule::whd => Command::Whd(capture_vars(parse_term(pair.into_inner().next().unwrap()))),
+        Rule::debug => Command::Set("debug ".to_string() + pair.into_inner().next().unwrap().as_str(), None),
+        Rule::stop => Command::Stop(),
+        _ => unreachable!(),
     }
 }
 
-fn parse_pi<'a>(lex: &mut Peekable<Lexer<'a>>) -> Result<Term, String> {
-    if let Some(Token::Var(v)) = lex.peek() {
-        let v = v.clone();
-        lex.next();
-        let mut ty = Term::Type(0); // Should be a placeholder, as of now, it is a default.
-        if lex.peek() == Some(&Token::Colon) {
-            lex.next();
-            ty = parse_term(lex)?;
+fn parse_tele(pair: Pair<Rule>) -> Telescope {
+    pair.into_inner().map(|pair| {
+        let mut inner_rules = pair.into_inner();
+        let names = inner_rules.next().unwrap();
+        let ty = parse_term(inner_rules.next().unwrap());
+        names.into_inner().map(move |name| (name.as_str().to_string(), ty.clone(), None))
+    }).flatten().collect()
+}
+
+fn parse_sterm_atom(pair: Pair<Rule>) -> Term {
+    //println!("sterm_atom: {:?}", pair.as_rule());
+    match pair.as_rule() {
+        Rule::paren_term => parse_term(pair.into_inner().next().unwrap()),
+        Rule::name => Term::Const(pair.as_str().to_string()),
+        Rule::fun => {
+            let mut inner_rules = pair.into_inner();
+            let tele = parse_tele(inner_rules.next().unwrap());
+            let body = parse_term(inner_rules.next().unwrap());
+            body.fun(tele)
         }
-        if lex.peek() == Some(&Token::Comma) {
-            lex.next();
-            let body = parse_term(lex)?;
-            Ok(Term::Pi(v, Rc::new(ty), Box::new(body)))
-        } else {
-            Err(format!("Expected comma after binder, got {:?}", lex.peek()).to_string())
+        Rule::forall => {
+            let mut inner_rules = pair.into_inner();
+            let tele = parse_tele(inner_rules.next().unwrap());
+            let body = parse_term(inner_rules.next().unwrap());
+            body.forall(tele)
         }
-    } else {
-        Err(format!("Expected identifier after 'forall', got {:?}", lex.peek()).to_string())
+        Rule::ttype => Term::Type(Univ::exact(0)),
+        Rule::tlet => {
+            let mut inner_rules = pair.into_inner();
+            let name = inner_rules.next().unwrap().as_str().to_string();
+            let ty = parse_term(inner_rules.next().unwrap());
+            let body = parse_term(inner_rules.next().unwrap());
+            let cont = parse_term(inner_rules.next().unwrap());
+            cont.fun(VecDeque::from([(name, ty, Some(body))]))
+        }
+        _ => unreachable!()
     }
 }
 
+fn parse_sterm(pair: Pair<Rule>) -> Term {
+    //println!("sterm: {:?}", pair.as_rule());
+    let mut args : VecDeque<Term> = pair.into_inner().map(parse_sterm_atom).collect();
+    if args.len() == 1 { let t = args.pop_front().unwrap(); t } else { Term::App(args.into_iter().map(|x| x.into()).collect()) }
+}
+
+fn parse_type_annot(pair: Pair<Rule>) -> Option<Term> {
+    //println!("type_annot: {:?}", pair.as_rule());
+    pair.into_inner().map(parse_term).next()
+}
+
+fn parse_term(pair: Pair<Rule>) -> Term {
+    let mut tele : VecDeque<Term> = pair.into_inner().map(parse_sterm).collect();
+    let body = tele.pop_back().unwrap();
+    body.forall(tele.into_iter().map(|ty| ("_".to_string(), ty, None)).collect())
+}
+
+pub fn parse(file: &str) -> Result<Vec<Command>, Error<Rule>> {
+    let mut ast : Vec<_> = YapaParser::parse(Rule::toplevel, file)?.collect();
+    ast.pop();
+    Ok(ast.into_iter().map(parse_command).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Term::*;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    #[test]
+    fn test_parser() {
+        assert_eq!(parse(&"x".to_string()), Ok(Const("x".to_string())));
+        assert_eq!(parse(&"(x)".to_string()), Ok(Const("x".to_string())));
+        assert_eq!(parse(&"x -> y".to_string()), Ok(Forall(VecDeque::from([("_".to_string(), Const("x".to_string()))]), Rc::new(Const("y".to_string())))));
+        assert_ne!(parse(&"x -> y".to_string()), Ok(Forall(VecDeque::from([("_".to_string(), Const("x".to_string()))]), Rc::new(Const("x".to_string())))));
+        assert_eq!(parse(&"x y z".to_string()), Ok(App(VecDeque::from([Rc::new(Const("x".to_string())), Rc::new(Const("y".to_string())), Rc::new(Const("z".to_string()))]))));
+        assert_eq!(parse(&"x y -> z".to_string()), Ok(Forall(VecDeque::from([("_".to_string(), App(VecDeque::from([Rc::new(Const("x".to_string())), Rc::new(Const("y".to_string()))])))]), Rc::new(Const("z".to_string())))));
+    }
+
+    #[test]
+    fn test_app() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse(&"x y".to_string())?.app(parse(&"z t".to_string())?), parse(&"x y (z t)".to_string())?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_subst() {
+        assert_eq!(Var(0).subst(|i| if i == 0 { Some(Type(Univ::exact(0))) } else { None }), Type(Univ::exact(0)));
+        assert_eq!(
+            App(VecDeque::from([Var(0).into(), Const("y".to_string()).into()])).subst(|i| if i == 0 { Some(Type(Univ::exact(0))) } else { None }),
+            App(VecDeque::from([Type(Univ::exact(0)).into(), Const("y".to_string()).into()])));
+        assert_eq!(
+            App(VecDeque::from([Const("y".to_string()).into(), Var(0).into()])).subst(|i| if i == 0 { Some(Type(Univ::exact(0))) } else { None }),
+            App(VecDeque::from([Const("y".to_string()).into(), Type(Univ::exact(0)).into()])));
+                       
+    }
+}

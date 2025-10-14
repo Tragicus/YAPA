@@ -1,47 +1,23 @@
-mod term;
+mod kernel;
+mod engine;
+mod command;
 mod parser;
-mod context;
-mod typecheck;
 
+use std::env;
+use std::io::Read;
 use crate::parser::parse;
-use crate::context::Context;
 
 fn main() {
-    let input = "forall x : Type, x";
+    let args: Vec<String> = env::args().collect();
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).unwrap();
+    let cmds = parse(&input).unwrap();
+    println!("Successful parse! Got {} commands.", cmds.len());
 
-    match parse(input) {
-        Ok(term) => {
-            println!("Parsed term: {:?}", term);
-            match term.type_check(&mut Context::new()) {
-                Ok(ty) => println!(" of type {:?}", ty),
-                Err(msg) => println!("{}", msg),
-            }
-        }
-        Err(e) => println!("Parse error: {}", e),
+    let mut ctx = engine::context::Context::new();
+    for c in cmds {
+        c.exec(&mut ctx);
+        ctx.reset_holes();
     }
 }
 
-/*
-fn main() {
-    let mut context = Context::new();
-
-    loop {
-        print!("> ");
-        io::stdout().flush().unwrap();
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-
-        let term = parse_term(&input); // Implement a parser for terms
-        match term {
-            Ok(term) => {
-                match type_check(&term, &context) {
-                    Ok(ty) => println!("Type: {:?}", ty),
-                    Err(e) => println!("Error: {}", e),
-                }
-            }
-            Err(e) => println!("Parse error: {}", e),
-        }
-    }
-}
-*/

@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 petgraph = "0.6.5"
+either = "1.15.0"
+pest = "2.8"
+pest_derive = "2.8"
