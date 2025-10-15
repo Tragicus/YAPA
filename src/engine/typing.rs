@@ -107,7 +107,7 @@ impl Term {
             Term::Fun(false, tele, body) => {
                 ctx.fold_telescope(|ctx, (_, ty, b), ok| {
                     let ok = ok?;
-                    ty.type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type()?;
+                    ty.type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
                     b.as_ref().map_or(Ok(()), |b| check_let(ctx, &b, ty))?;
                     Ok(ok)
                 }, &mut tele.iter(), Ok(()), |ctx, ok| {
@@ -121,7 +121,7 @@ impl Term {
                     let u = ty.clone().type_of(ctx)?;
                     match b {
                         None => {
-                            let u = u.whd(ctx, WhdFlags::default())?.dest_type()?;
+                            let u = u.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
                             univs.push_front(u)
                         }
                         Some(b) => check_let(ctx, &b, ty)?
@@ -129,7 +129,7 @@ impl Term {
                     Ok(univs)
                 }, &mut tele.iter(), Ok(VecDeque::new()), |ctx, univs| {
                     let univs = univs?;
-                    let v = (**body).clone().type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type()?;
+                    let v = (**body).clone().type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
                     Ok(Term::Type(univs.iter().fold(v, |v, u| u.max(&v))))
                 })?
             }

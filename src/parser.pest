@@ -15,7 +15,7 @@ type_annot = { ":" ~ term | "" }
 
 term = { sterm ~ ("->" ~ sterm)* }
 
-tele = { tele_item* }
+tele = { tele_item+ }
 tele_item = { "(" ~ names ~ ":" ~ term ~ ")" }
 
 sterm = { ( paren_term | fun | forall | ttype | tlet | name )+ }

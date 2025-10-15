@@ -1,6 +1,7 @@
 use crate::kernel::univ::*;
 use super::context::*;
 use super::error::*;
+use super::typing::*;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashSet;
@@ -289,10 +290,16 @@ impl Term {
         }
     }
 
-    pub fn dest_type(self) -> Result<Univ, Error> {
+    pub fn dest_type(self, ctx: &mut Context) -> Result<Univ, Error> {
         match self {
             Term::Type(c) => Ok(c),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAType(self) })
+            t => {
+                //TODO: generate fresh universe
+                let u = Univ::exact(0);
+                if unify(ctx, &Term::Type(u.clone()), &t)? { Ok(u) } else {
+                    Err(Error { ctx: ctx.clone(), err: TypeError::NotAType(t) })
+                }
+            }
         }
     }
     

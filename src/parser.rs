@@ -1,5 +1,5 @@
 use crate::kernel::univ::*;
-use crate::engine::term::*;
+use crate::engine::context::*;
 use crate::command::*;
 use std::rc::Rc;
 use std::collections::VecDeque;
@@ -14,59 +14,74 @@ use pest::iterators::Pair;
 #[grammar = "parser.pest"]
 struct YapaParser;
 
-fn capture_vars(t: Term) -> Term {
-    fn fold_map_tele<'a, I>(ctx: &mut HashMap<String, Vec<usize>>, i: usize, mut tele: I, body: Term) -> (Telescope, Term)
-        where I: Iterator<Item = Binder> {
-        let x = tele.next();
-        match x {
-            None => (Telescope::new(), aux(ctx, i, body)),
-            Some((v, ty, b)) => {
-                let ty = aux(ctx, i, ty);
-                let b = b.map(|b| aux(ctx, i, b));
-                match ctx.get_mut(&v) {
-                    None => { ctx.insert(v.clone(), vec![i]); },
-                    Some(bds) => bds.push(i)
-                };
-                let (mut tele, body) = fold_map_tele(ctx, i+1, tele, body);
-                let bds = ctx.get_mut(&v).unwrap();
-                if bds.len() == 1 { ctx.remove(&v); } else { bds.pop(); };
-                tele.push_front((v, ty, b));
-                (tele, body)
+pub type Binder = (String, Term, Option<Term>);
+pub type Telescope = VecDeque<Binder>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Term {
+    Const(String),
+    App(VecDeque<Term>),
+    /* The Fun constructor packages the \lambda, \Pi and let constructs. Lets
+     * are represented using defined binders. The boolean is true whenever the
+     * constructor represents a \Pi, false when it represents a \lambda. */
+    Fun(bool, Telescope, Box<Term>),
+    Type(Univ),
+}
+
+impl Term {
+    pub fn capture_vars(self, ctx: &mut Context) -> crate::engine::term::Term {
+        fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut HashMap<String, Vec<usize>>, i: usize, mut tele: I, body: Term) -> (crate::engine::term::Telescope, crate::engine::term::Term)
+            where I: Iterator<Item = Binder> {
+            let x = tele.next();
+            match x {
+                None => (crate::engine::term::Telescope::new(), aux(ctx, vars, i, body)),
+                Some((v, ty, b)) => {
+                    let ty = aux(ctx, vars, i, ty);
+                    let b = b.map(|b| aux(ctx, vars, i, b));
+                    match vars.get_mut(&v) {
+                        None => { vars.insert(v.clone(), vec![i]); },
+                        Some(bds) => bds.push(i)
+                    };
+                    let (mut tele, body) = ctx.with_var((v.clone(), ty.clone(), b.clone()), |ctx| fold_map_tele(ctx, vars, i+1, tele, body));
+                    let bds = vars.get_mut(&v).unwrap();
+                    if bds.len() == 1 { vars.remove(&v); } else { bds.pop(); };
+                    tele.push_front((v, ty, b));
+                    (tele, body)
+                }
             }
         }
-    }
 
-    fn aux(ctx: &mut HashMap<String, Vec<usize>>, i: usize, t: Term) -> Term {
-        match t {
-            Term::Var(_) | Term::Type(_) | Term::Hole(_) => t,
-            Term::Const(c) => {
-                let t = ctx.get(&c).map_or(Term::Const(c.clone()), |bds| Term::Var(i - bds[bds.len()-1] - 1));
-                println!("{} -> {}", c, t);
-                t
-            }
-            Term::App(args) => Term::App(args.into_iter().map(|t| aux(ctx, i, Rc::unwrap_or_clone(t)).into()).collect()),
-            Term::Fun(forall, tele, body) => {
-                let (tele, body) = fold_map_tele(ctx, i, tele.into_iter(), Rc::unwrap_or_clone(body));
-                Term::Fun(forall, tele, body.into())
+        fn aux(ctx: &mut Context, vars: &mut HashMap<String, Vec<usize>>, i: usize, t: Term) -> crate::engine::term::Term {
+            match t {
+                Term::Type(u) => crate::engine::term::Term::Type(u),
+                Term::Const(c) =>
+                    if c == "_".to_string() { ctx.new_hole(c, None, true) } else {
+                        vars.get(&c).map_or(crate::engine::term::Term::Const(c.clone()), |bds| crate::engine::term::Term::Var(i - bds[bds.len()-1] - 1))
+                    },
+                Term::App(args) => crate::engine::term::Term::App(args.into_iter().map(|t| aux(ctx, vars, i, t).into()).collect()),
+                Term::Fun(forall, tele, body) => {
+                    let (tele, body) = fold_map_tele(ctx, vars, i, tele.into_iter(), *body);
+                    crate::engine::term::Term::Fun(forall, tele, body.into())
+                }
             }
         }
-    }
 
-    aux(&mut HashMap::new(), 0, t)
+        aux(ctx, &mut HashMap::new(), 0, self)
+    }
 }
 
 fn parse_command(pair:Pair<Rule>) -> Command {
     match pair.as_rule() {
-        Rule::print => Command::Print(capture_vars(parse_term(pair.into_inner().next().unwrap()))),
-        Rule::check => Command::Check(capture_vars(parse_term(pair.into_inner().next().unwrap()))),
+        Rule::print => Command::Print(parse_term(pair.into_inner().next().unwrap())),
+        Rule::check => Command::Check(parse_term(pair.into_inner().next().unwrap())),
         Rule::define => {
             let mut inner_rules = pair.into_inner();
             let name = inner_rules.next().unwrap().as_str().to_string();
             let ty = parse_type_annot(inner_rules.next().unwrap());
-            let t = capture_vars(parse_term(inner_rules.next().unwrap()));
+            let t = parse_term(inner_rules.next().unwrap());
             Command::Define(name, ty, t)
         }
-        Rule::whd => Command::Whd(capture_vars(parse_term(pair.into_inner().next().unwrap()))),
+        Rule::whd => Command::Whd(parse_term(pair.into_inner().next().unwrap())),
         Rule::debug => Command::Set("debug ".to_string() + pair.into_inner().next().unwrap().as_str(), None),
         Rule::stop => Command::Stop(),
         _ => unreachable!(),
@@ -91,13 +106,13 @@ fn parse_sterm_atom(pair: Pair<Rule>) -> Term {
             let mut inner_rules = pair.into_inner();
             let tele = parse_tele(inner_rules.next().unwrap());
             let body = parse_term(inner_rules.next().unwrap());
-            body.fun(tele)
+            Term::Fun(false, tele, Box::new(body))
         }
         Rule::forall => {
             let mut inner_rules = pair.into_inner();
             let tele = parse_tele(inner_rules.next().unwrap());
             let body = parse_term(inner_rules.next().unwrap());
-            body.forall(tele)
+            Term::Fun(true, tele, Box::new(body))
         }
         Rule::ttype => Term::Type(Univ::exact(0)),
         Rule::tlet => {
@@ -106,7 +121,7 @@ fn parse_sterm_atom(pair: Pair<Rule>) -> Term {
             let ty = parse_term(inner_rules.next().unwrap());
             let body = parse_term(inner_rules.next().unwrap());
             let cont = parse_term(inner_rules.next().unwrap());
-            cont.fun(VecDeque::from([(name, ty, Some(body))]))
+            Term::Fun(false, VecDeque::from([(name, ty, Some(body))]), Box::new(cont))
         }
         _ => unreachable!()
     }
@@ -126,7 +141,9 @@ fn parse_type_annot(pair: Pair<Rule>) -> Option<Term> {
 fn parse_term(pair: Pair<Rule>) -> Term {
     let mut tele : VecDeque<Term> = pair.into_inner().map(parse_sterm).collect();
     let body = tele.pop_back().unwrap();
-    body.forall(tele.into_iter().map(|ty| ("_".to_string(), ty, None)).collect())
+    if tele.len() == 0 { body } else {
+        Term::Fun(true, tele.into_iter().map(|ty| ("_".to_string(), ty, None)).collect(), Box::new(body))
+    }
 }
 
 pub fn parse(file: &str) -> Result<Vec<Command>, Error<Rule>> {

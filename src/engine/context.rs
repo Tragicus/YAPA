@@ -132,9 +132,10 @@ impl Context {
     pub fn new_hole(&mut self, v: Name, ty: Option<Term>, with_ctx: bool) -> Term {
         let mut args = VecDeque::new();
         if with_ctx {
-            self.var.iter().fold(self.var.len() - 1, |i, (_, _, b)| {
+            self.var.iter().fold(self.var.len(), |i, (_, _, b)| {
+                let i = i - 1;
                 if b.is_none() { args.push_back(Term::Var(i).into()) };
-                i-1
+                i
             });
         };
         let mut ty = ty.unwrap_or_else(|| {
