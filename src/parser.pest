@@ -15,9 +15,10 @@ end_proof = { qed | defined }
 qed = { "Qed" ~ "." }
 defined = { "Defined" ~ "." }
 
-tac = { exact ~ "." | refine ~ "." }
+tac = { exact ~ "." | refine ~ "." | apply ~ "."}
 exact = { "exact" ~ term }
 refine = { "refine" ~ term }
+apply = { "apply" ~ term }
 
 def_body = { ":=" ~ term | "" }
 type_annot = { ":" ~ term | "" }

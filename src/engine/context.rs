@@ -168,7 +168,7 @@ impl Context {
     }
 
     pub fn instantiate_hole(&mut self, tv: &Term, t: Term) -> Result<&mut Self, Error> {
-        println!("instantiate_hole {:?} <- {:?}", tv, t);
+        //println!("instantiate_hole {:?} <- {:?}", tv, t);
         let tvty = tv.type_of(self)?;
         let ty = t.type_of(self)?;
         if !unify(self, &tvty, &ty)? { return Err(Error { ctx: self.clone(), err: TypeError::TypeMismatch(tvty, t) }) };

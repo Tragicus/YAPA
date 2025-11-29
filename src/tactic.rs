@@ -1,5 +1,6 @@
 use crate::engine::term::*;
 use crate::engine::error::*;
+use crate::kernel::reduction::WhdFlags;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
@@ -8,8 +9,8 @@ use crate::command::Status;
 
 #[derive(Clone, Debug)]
 pub struct Goal {
-    ctx: Telescope,
-    goal: VarType
+    pub ctx: Telescope,
+    pub goal: VarType
 }
 
 impl PartialEq for Goal {
@@ -66,7 +67,8 @@ impl Term {
 #[derive(Debug)]
 pub enum Tactic {
     Exact(crate::parser::Term),
-    Refine(crate::parser::Term)
+    Refine(crate::parser::Term),
+    Apply(crate::parser::Term)
 }
 
 impl Tactic {
@@ -80,7 +82,7 @@ impl Tactic {
                     if t.has_hole(&ctx.engine) {
                         Err(Error { ctx: ctx.engine.clone(), err: TypeError::NotGround(t.clone()) }).unwrap()
                     };
-                    let args = crate::utils::iota(g.ctx.len()).into_iter().map(|i| Term::Var(g.ctx.len() - i - 1).into()).collect();
+                    let args = crate::utils::iota(ctx.engine.var.len()).into_iter().map(|i| Term::Var(ctx.engine.var.len() - i - 1).into()).collect();
                     ctx.engine.instantiate_hole(&Term::Hole(g.goal).apps(args), t).unwrap();
                     std::mem::swap(&mut ctx.engine.var, &mut g.ctx);
                 }
@@ -88,9 +90,32 @@ impl Tactic {
                     let mut g = match goals.pop_front() { None => { return (); } Some(g) => g };
                     std::mem::swap(&mut ctx.engine.var, &mut g.ctx);
                     let t = t.capture_vars(&mut ctx.engine);
-                    let args = crate::utils::iota(g.ctx.len()).into_iter().map(|i| Term::Var(g.ctx.len() - i - 1).into()).collect();
+                    let args = crate::utils::iota(ctx.engine.var.len()).into_iter().map(|i| Term::Var(ctx.engine.var.len() - i - 1).into()).collect();
                     let mut newgoals = t.collect_goals(&mut ctx.engine).unwrap().into_iter().collect::<VecDeque<_>>();
-                    ctx.engine.instantiate_hole(&Term::Hole(g.goal).apps(args), t.fun(ctx.engine.var.clone())).unwrap();
+                    ctx.engine.instantiate_hole(&Term::Hole(g.goal).apps(args), t).unwrap();
+                    newgoals.append(goals);
+                    *goals = newgoals;
+                    std::mem::swap(&mut ctx.engine.var, &mut g.ctx);
+                }
+                Tactic::Apply(t) => {
+                    let mut g = match goals.pop_front() { None => { return (); } Some(g) => g };
+                    std::mem::swap(&mut ctx.engine.var, &mut g.ctx);
+                    let mut t = t.capture_vars(&mut ctx.engine);
+                    let args = crate::utils::iota(ctx.engine.var.len()).into_iter().map(|i| Term::Var(ctx.engine.var.len() - i - 1).into()).collect();
+                    let goal = Term::Hole(g.goal).apps(args);
+                    let tg = goal.type_of(&mut ctx.engine).unwrap();
+                    let mut newgoals = VecDeque::new();
+                    loop {
+                        let ty = t.type_of(&mut ctx.engine).unwrap();
+                        if crate::engine::typing::unify(&mut ctx.engine, &ty, &tg).unwrap() {
+                            newgoals = t.collect_goals(&mut ctx.engine).unwrap().into_iter().collect();
+                            ctx.engine.instantiate_hole(&goal, t).unwrap();
+                            break;
+                        }
+                        let (n, ty, _) = &ty.whd(&mut ctx.engine, WhdFlags::default()).unwrap().dest_forall().unwrap().0[0];
+                        let h = ctx.engine.new_hole(n.clone(), Some(ty.clone()), true);
+                        t = t.app(h);
+                    }
                     newgoals.append(goals);
                     *goals = newgoals;
                     std::mem::swap(&mut ctx.engine.var, &mut g.ctx);

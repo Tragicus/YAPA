@@ -53,7 +53,7 @@ pub fn unify_instantiate(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool
 }
 
 pub fn unify(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Error> {
-    println!("{:?} =?= {:?}", t1, t2);
+    //println!("{:?} =?= {:?}", t1, t2);
     if unify_rigid(ctx, t1, t2)? { return Ok(true); }
     if t2.may_reduce(ctx)? { let t2 = unify_reduce(ctx, t2.clone())?; return unify(ctx, t1, &t2) };
     if t1.may_reduce(ctx)? { let t1 = unify_reduce(ctx, t1.clone())?; return unify(ctx, &t1, t2) };

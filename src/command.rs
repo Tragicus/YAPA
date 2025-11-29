@@ -70,7 +70,12 @@ impl Command {
                     ctx.engine.reset_holes();
                 }
             }
-            Command::Tac(tac) => tac.exec(ctx),
+            Command::Tac(tac) => {
+                tac.exec(ctx);
+                let Status::Proofmode(_, _, _, ref mut goals) = ctx.status else { unreachable!() };
+                let mut fgoals : VecDeque<_> = goals.into_iter().filter(|g| ctx.engine.get_hole_body(&g.goal).unwrap().is_none()).map(|g| g.clone()).collect();
+                std::mem::swap(goals, &mut fgoals);
+            }
             Command::Qed(transparent) => {
                 if let Status::Proofmode(v, ty, t, goals) = &ctx.status {
                     if goals.len() != 0 { panic!("Cannot conclude, open goals remain.") };

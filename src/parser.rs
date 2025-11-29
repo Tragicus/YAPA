@@ -105,6 +105,7 @@ fn parse_tactic(pair: Pair<Rule>) -> Tactic {
     match pair.as_rule() {
         Rule::exact => Tactic::Exact(parse_term(pair.into_inner().next().unwrap())),
         Rule::refine => Tactic::Refine(parse_term(pair.into_inner().next().unwrap())),
+        Rule::apply => Tactic::Apply(parse_term(pair.into_inner().next().unwrap())),
         _ => unreachable!(),
     }
 }
