@@ -2,6 +2,7 @@ use crate::kernel::univ::*;
 use super::context::*;
 use super::error::*;
 use super::typing::*;
+use crate::kernel::reduction::WhdFlags;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashSet;
@@ -33,29 +34,35 @@ pub enum Term {
 }
 
 impl Term {
-    fn is_atomic(&self) -> bool {
+    pub fn is_atomic(&self) -> bool {
         match self {
             Term::Var(_) | Term::Const(_) | Term::Type(_) | Term::Hole(_) => true,
             _ => false
         }
     }
 
-    fn fmt_atom(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    pub fn fmt_atom(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_atomic() {
             write!(f, "{}", self)
         } else {
             write!(f, "({})", self)
         }
     }
+}
 
-    fn fmt_telescope(tele: &Telescope, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        Ok(for (v, t, b) in tele.iter() {
-            match b {
-                None => write!(f, " ({} : {})", v, t)?,
-                Some(b) => write!(f, " ({} : {} := {})", v, t, b)?
-            };
-        })
-    }
+pub fn fmt_binder(bind: &Binder, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   let (v, t, b) = bind;
+   write!(f, "({} : {}", v, t)?;
+   b.as_ref().map_or(write!(f, ""), |b| { write!(f, " := {}", b) })?;
+   write!(f, ")")
+}
+
+pub fn fmt_telescope<'a, T : Iterator<Item = &'a Binder>>(tele: T, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    tele.fold(Ok(()), |ok, b| {
+        ok?;
+        write!(f, " ")?;
+        fmt_binder(b, f)
+    })
 }
 
 impl std::fmt::Display for Term {
@@ -71,7 +78,7 @@ impl std::fmt::Display for Term {
             }
             Term::Fun(forall, tele, body) => {
                 write!(f, "{}", if *forall { "forall" } else { "fun" })?;
-                Term::fmt_telescope(tele, f)?;
+                fmt_telescope(tele.iter(), f)?;
                 write!(f, "{} {}", if *forall { "," } else { " =>" }, body)
             }
             Term::Type(u) => write!(f, "Type@({})", u),
@@ -162,6 +169,26 @@ impl Term {
     //Substitutes every occurrence of `Var(0)` by `t` and decrements every other variable in `self`
     pub fn subst0(self, t: &Term) -> Term {
         self.subst(|i| if i == 0 { t.clone() } else { Term::Var(i - 1) })
+    }
+
+    pub fn fold<'a, T, F : Fn(&mut Context, &Term, T) -> T>(&self, ctx: &mut Context, f: F, init: T) -> Result<T, Error> {
+        let init = f(ctx, self, init);
+        Ok(match self {
+            Term::Var(v) => {
+                let t = ctx.get_hole_body(v)?;
+                let t = match t { Some(t) => t.clone(), None => Term::Var(*v) };
+                f(ctx, &t, init)
+            }
+            Term::Const(_) | Term::Type(_) => init,
+            Term::App(args) => args.iter().fold(init, |t, arg| f(ctx, &*arg, t)),
+            Term::Fun(_, tele, body) =>
+                ctx.fold_telescope(|ctx, (_, ty, t), x| { let x = f(ctx, ty, x); match t { None => x, Some(t) => f(ctx, t, x) } }, &mut tele.iter(), init, |ctx, x| f(ctx, &*body, x)),
+            Term::Hole(h) => {
+                let t = ctx.get_hole_body(h)?;
+                let t = match t { Some(t) => t.clone(), None => Term::Var(*h) };
+                f(ctx, &t, init)
+            }
+        })
     }
 
     //TOTHINK: Should I not reduce defined evars?
@@ -290,6 +317,18 @@ impl Term {
         }
     }
 
+    /*
+    pub fn dest_arity(self, ctx: &mut Context) -> Result<Telescope, Error> {
+        match self.whd(ctx, WhdFlags::default())? {
+            Term::Fun(true, tele, body) => {
+                let (tele0, ret) = ctx.fold_telescope(|_, _, _| (), tele, (), |ctx, _| Rc::unwrap_or_clone(body).dest_arity(ctx))?;
+                tele.append(tele0);
+                Ok((tele, ret))
+            }
+            t => Ok((VecDeque::new(), t)) //TODO: return the non-reduced return type.
+        }
+    }*/
+
     pub fn dest_type(self, ctx: &mut Context) -> Result<Univ, Error> {
         match self {
             Term::Type(c) => Ok(c),
@@ -307,6 +346,15 @@ impl Term {
         match self {
             Term::Hole(i) => Ok(i),
             _ => Err(Error { ctx: Context::new(), err: TypeError::NotAHole(self) })
+        }
+    }
+
+    pub fn has_hole(&self, ctx: &Context) -> bool {
+        match self {
+            Term::Var(_) | Term::Const(_) | Term::Type(_) => false,
+            Term::Hole(h) => ctx.get_hole_body(h).map_or(true, |t| t.as_ref().map_or(true, |t| t.has_hole(ctx))),
+            Term::App(args) => !args.iter().all(|t| !t.has_hole(ctx)),
+            Term::Fun(_, tele, body) => !tele.iter().all(|(_, t, b)| !(t.has_hole(ctx) || b.as_ref().map_or(false, |t| t.has_hole(ctx)))) || body.has_hole(ctx),
         }
     }
 

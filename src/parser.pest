@@ -3,14 +3,23 @@ COMMENT = _{ "(*" ~ (!"*)" ~ ANY)* ~ "*)" }
 
 toplevel = _{ SOI ~ (command)* ~ EOI }
 
-command = _{ ( print | check | define | whd | stop ) }
+command = _{ ( print | check | end_proof | define | whd | stop | proof | tac ) }
 print = { "Print" ~ term ~ "." }
 check = { "Check" ~ term ~ "." }
-define = { ("Define" | "Definition") ~ name ~ type_annot ~ ":=" ~ term ~ "." }
+define = { ("def" | "Define" | "Definition") ~ name ~ type_annot ~ def_body ~ "." }
 whd = { "Whd" ~ term ~ "." }
 debug = { "Set" ~ "Debug" ~ "\"" ~ string ~ "\"" }
 stop = {  "Stop." }
+proof = { "Proof" ~ "." }
+end_proof = { qed | defined }
+qed = { "Qed" ~ "." }
+defined = { "Defined" ~ "." }
 
+tac = { exact ~ "." | refine ~ "." }
+exact = { "exact" ~ term }
+refine = { "refine" ~ term }
+
+def_body = { ":=" ~ term | "" }
 type_annot = { ":" ~ term | "" }
 
 term = { sterm ~ ("->" ~ sterm)* }

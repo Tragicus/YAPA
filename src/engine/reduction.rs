@@ -49,9 +49,13 @@ impl Term {
                     }
                 }
                 Term::Const(ref c) if flags.delta => {
-                    let hd = ctx.get_const_body(c)?.clone();
-                    let (_, hd, args) = if flags.once { (true, hd, args) } else { aux(hd, args, ctx, flags)? };
-                    (true, hd, args)
+                    match ctx.get_const_body(c)?.map(|hd| hd.clone()) {
+                        None => (false, hd, args),
+                        Some(hd) => {
+                            let (_, hd, args) = if flags.once { (true, hd, args) } else { aux(hd, args, ctx, flags)? };
+                            (true, hd, args)
+                        }
+                    }
                 }
                 Term::Fun(forall, mut tele, body) if flags.zeta && hd.is_let() => {
                     let (_, _, b) = tele.pop_front().unwrap();
@@ -96,9 +100,9 @@ impl Term {
 
     /* [!t.may_reduce(ctx)] implies [t.whd(ctx, WhdFlags.default()) == t] */
     pub fn may_reduce(&self, ctx: &mut Context) -> Result<bool, Error> {
-        Ok(match self.clone().whd(ctx, WhdFlags::empty())?.head() {
-            Term::Type(_) | Term::Hole(_) => false,
-            Term::Fun(_, _, _) => 1 < self.stack_len() || self.is_let(),
+        Ok(match self.head() {
+            Term::Type(_) => false,
+            Term::Fun(_, _, _) => self.stack_len() != 0 || self.is_let(),
             Term::Var(v) => {
                 match ctx.get_var_body(&v) {
                     Err(Error { ctx: _, err: TypeError::NoBody(_) }) => false,
@@ -106,7 +110,8 @@ impl Term {
                     Ok(b) => b.is_some()
                 }
             }
-            Term::Const(_) => true,
+            Term::Const(c) => ctx.get_const_body(c)?.is_some(),
+            Term::Hole(h) => ctx.get_hole_body(h)?.is_some(),
             Term::App(_) => unreachable!()
         })
     }

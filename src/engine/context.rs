@@ -26,10 +26,10 @@ pub enum Commit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Context {
     // local variables
-    pub var: Vec<Binder>,
+    pub var: Telescope,
 
     // global variables
-    pub cst: HashMap<Name, (crate::kernel::term::Term, crate::kernel::term::Term)>,
+    pub cst: HashMap<Name, (crate::kernel::term::Term, Option<crate::kernel::term::Term>)>,
 
     // holes and unification constraints
     pub hole: Vec<HoleContext>,
@@ -48,10 +48,24 @@ pub struct Context {
     //pub universes: Graph<(), bool>,
 }
 
+impl std::fmt::Display for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ctx(vars:")?;
+        fmt_telescope(self.var.iter(), f)?;
+        write!(f, "\n holes:")?;
+        self.hole.iter().fold(write!(f, ""), |ok, h| {
+            let ok = ok?;
+            write!(f, "({} : {}", h.name, h.ty)?;
+            h.body.as_ref().map_or(Ok(ok), |b| { write!(f, " := {}", b) })?;
+            write!(f, ")")
+        })
+    }
+}
+
 impl Context {
     pub fn new() -> Self {
-        Context {
-            var: Vec::new(),
+     Context {
+            var: VecDeque::new(),
             cst: HashMap::new(),
             hole: Vec::new(),
             commits: Vec::new(),
@@ -65,7 +79,7 @@ impl Context {
         self.var.get(self.var.len() - *v - 1).map_or(Err(Error { ctx: self.clone(), err: TypeError::UnboundVar(v.clone()) }), |x| Ok(x))
     }
 
-    pub fn find_const(&self, v: &Name) -> Result<&(crate::kernel::term::Term, crate::kernel::term::Term), Error> {
+    pub fn find_const(&self, v: &Name) -> Result<&(crate::kernel::term::Term, Option<crate::kernel::term::Term>), Error> {
         self.cst.get(v).ok_or(Error { ctx: self.clone(), err: TypeError::UnboundConst(v.clone()) })
     }
 
@@ -93,9 +107,9 @@ impl Context {
         Ok(of_kernel(t.clone()))
     }
 
-    pub fn get_const_body(&self, v: &Name) -> Result<Term, Error> {
+    pub fn get_const_body(&self, v: &Name) -> Result<Option<Term>, Error> {
         let (_, t) = self.find_const(v)?;
-        Ok(of_kernel(t.clone()))
+        Ok(t.as_ref().map(|t| of_kernel(t.clone())))
     }
 
     pub fn get_hole_name(&self, v: &VarType) -> Result<&Name, Error> {
@@ -119,13 +133,13 @@ impl Context {
     }
 
     pub fn push_var(&mut self, t: (Name, Term, Option<Term>)) -> &mut Self {
-        self.var.push(t);
+        self.var.push_back(t);
         self
     }
 
-    pub fn push_const(&mut self, c: Name, t: (Term, Term)) -> Result<&mut Self, Error> {
-        let (t, ty) = t;
-        self.cst.insert(c, (t.to_kernel(self)?, ty.to_kernel(self)?));
+    pub fn push_const(&mut self, c: Name, t: (Term, Option<Term>)) -> Result<&mut Self, Error> {
+        let (ty, t) = t;
+        self.cst.insert(c, (ty.to_kernel(self)?, t.map_or(Ok(None), |t| Ok(Some(t.to_kernel(self)?)))?));
         Ok(self)
     }
 
@@ -154,24 +168,26 @@ impl Context {
     }
 
     pub fn instantiate_hole(&mut self, tv: &Term, t: Term) -> Result<&mut Self, Error> {
+        println!("instantiate_hole {:?} <- {:?}", tv, t);
         let tvty = tv.type_of(self)?;
         let ty = t.type_of(self)?;
         if !unify(self, &tvty, &ty)? { return Err(Error { ctx: self.clone(), err: TypeError::TypeMismatch(tvty, t) }) };
         let (v, args) = tv.clone().behead();
         let v = v.dest_hole()?;
-        let (_, map) = args.iter().fold(Ok((args.len() - 1, HashMap::new())), |m, arg| {
+        let nargs = args.len();
+        let (_, map) = args.iter().fold(Ok((1, HashMap::new())), |m, arg| {
             let (i, mut map) = m?;
             let v = Rc::unwrap_or_clone(arg.clone()).whd(self, WhdFlags::default())?.dest_var().map_err(|_| Error { ctx: self.clone(), err: TypeError::HO(tv.clone()) })?;
-            map.insert(v, if map.contains_key(&v) { None } else { Some(Term::Var(i)) });
+            map.insert(v, if map.contains_key(&v) { None } else { Some(Term::Var(nargs - i)) });
             Ok((i + 1, map))
         })?;
         if t.free_vars().iter().all(|v| map.get(v).map(|v| v.clone()).flatten().is_some()) {
-            let h = match self.hole.get_mut(v) {
-                Some(h) => h,
-                None => Err(Error { ctx: self.clone(), err: TypeError::UnboundHole(v.clone()) })?
-            };
+            //TODO: Am I sure that I get at least nargs binders?
+            let mut tele = if nargs == 0 { VecDeque::new() } else { let (tele, _) = self.get_hole_type(&v)?.clone().dest_forall()?; tele };
+            tele.truncate(nargs);
+            let h = self.hole.get_mut(v).expect("Anomaly: hole should exist.");
             h.body.as_ref().map(|tv| self.commits.push(Commit::ReinstantiateHole(v, tv.clone())));
-            h.body = Some(t.subst(|v| map.get(&v).map(|v| v.clone()).flatten().unwrap()));
+            h.body = Some(t.subst(|v| map.get(&v).map(|v| v.clone()).flatten().unwrap()).fun(tele));
             Ok(self)
         } else {
             Err(Error { ctx: self.clone(), err: TypeError::HO(tv.clone()) })
@@ -204,7 +220,7 @@ impl Context {
     }
 
     pub fn pop_var(&mut self) -> &mut Self {
-        self.var.pop();
+        self.var.pop_back();
         self
     }
 

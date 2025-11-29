@@ -1,9 +1,12 @@
 use crate::kernel::univ::*;
 use crate::engine::context::*;
 use crate::command::*;
+use crate::engine::context::Context;
+use crate::tactic::*;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashMap;
+use crate::utils::ShadowHashMap;
 use std::vec::Vec;
 use pest::Parser;
 use pest_derive::Parser;
@@ -30,7 +33,7 @@ pub enum Term {
 
 impl Term {
     pub fn capture_vars(self, ctx: &mut Context) -> crate::engine::term::Term {
-        fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut HashMap<String, Vec<usize>>, i: usize, mut tele: I, body: Term) -> (crate::engine::term::Telescope, crate::engine::term::Term)
+        fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, mut tele: I, body: Term) -> (crate::engine::term::Telescope, crate::engine::term::Term)
             where I: Iterator<Item = Binder> {
             let x = tele.next();
             match x {
@@ -38,25 +41,21 @@ impl Term {
                 Some((v, ty, b)) => {
                     let ty = aux(ctx, vars, i, ty);
                     let b = b.map(|b| aux(ctx, vars, i, b));
-                    match vars.get_mut(&v) {
-                        None => { vars.insert(v.clone(), vec![i]); },
-                        Some(bds) => bds.push(i)
-                    };
+                    vars.insert(v.clone(), i);
                     let (mut tele, body) = ctx.with_var((v.clone(), ty.clone(), b.clone()), |ctx| fold_map_tele(ctx, vars, i+1, tele, body));
-                    let bds = vars.get_mut(&v).unwrap();
-                    if bds.len() == 1 { vars.remove(&v); } else { bds.pop(); };
+                    vars.remove(&v);
                     tele.push_front((v, ty, b));
                     (tele, body)
                 }
             }
         }
 
-        fn aux(ctx: &mut Context, vars: &mut HashMap<String, Vec<usize>>, i: usize, t: Term) -> crate::engine::term::Term {
+        fn aux(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, t: Term) -> crate::engine::term::Term {
             match t {
                 Term::Type(u) => crate::engine::term::Term::Type(u),
                 Term::Const(c) =>
                     if c == "_".to_string() { ctx.new_hole(c, None, true) } else {
-                        vars.get(&c).map_or(crate::engine::term::Term::Const(c.clone()), |bds| crate::engine::term::Term::Var(i - bds[bds.len()-1] - 1))
+                        vars.get(&c).map_or(crate::engine::term::Term::Const(c.clone()), |v| crate::engine::term::Term::Var(i - v - 1))
                     },
                 Term::App(args) => crate::engine::term::Term::App(args.into_iter().map(|t| aux(ctx, vars, i, t).into()).collect()),
                 Term::Fun(forall, tele, body) => {
@@ -66,7 +65,12 @@ impl Term {
             }
         }
 
-        aux(ctx, &mut HashMap::new(), 0, self)
+        let (_, mut vars) = ctx.var.iter().fold((0, ShadowHashMap::new()), |(i, mut vars), (v, _, _)| {
+            vars.insert(v.clone(), i);
+            (i+1, vars)
+        });
+
+        aux(ctx, &mut vars, ctx.var.len(), self)
     }
 }
 
@@ -78,12 +82,29 @@ fn parse_command(pair:Pair<Rule>) -> Command {
             let mut inner_rules = pair.into_inner();
             let name = inner_rules.next().unwrap().as_str().to_string();
             let ty = parse_type_annot(inner_rules.next().unwrap());
-            let t = parse_term(inner_rules.next().unwrap());
+            let t = parse_def_body(inner_rules.next().unwrap());
             Command::Define(name, ty, t)
+        }
+        Rule::proof => Command::Skip(),
+        Rule::tac => Command::Tac(parse_tactic(pair.into_inner().next().unwrap())),
+        Rule::end_proof => {
+            Command::Qed(match pair.into_inner().next().unwrap().as_rule() {
+                Rule::qed => false,
+                Rule::defined => true,
+                _ => unreachable!()
+            })
         }
         Rule::whd => Command::Whd(parse_term(pair.into_inner().next().unwrap())),
         Rule::debug => Command::Set("debug ".to_string() + pair.into_inner().next().unwrap().as_str(), None),
         Rule::stop => Command::Stop(),
+        _ => unreachable!(),
+    }
+}
+
+fn parse_tactic(pair: Pair<Rule>) -> Tactic {
+    match pair.as_rule() {
+        Rule::exact => Tactic::Exact(parse_term(pair.into_inner().next().unwrap())),
+        Rule::refine => Tactic::Refine(parse_term(pair.into_inner().next().unwrap())),
         _ => unreachable!(),
     }
 }
@@ -133,10 +154,15 @@ fn parse_sterm(pair: Pair<Rule>) -> Term {
     if args.len() == 1 { let t = args.pop_front().unwrap(); t } else { Term::App(args.into_iter().map(|x| x.into()).collect()) }
 }
 
-fn parse_type_annot(pair: Pair<Rule>) -> Option<Term> {
+fn parse_def_body(pair: Pair<Rule>) -> Term {
+    //println!("def_body: {:?}", pair.as_rule());
+    pair.into_inner().map(parse_term).next().unwrap_or(Term::Const("_".to_string()))
+} 
+
+fn parse_type_annot(pair: Pair<Rule>) -> Term {
     //println!("type_annot: {:?}", pair.as_rule());
-    pair.into_inner().map(parse_term).next()
-}
+    pair.into_inner().map(parse_term).next().unwrap_or(Term::Const("_".to_string()))
+} 
 
 fn parse_term(pair: Pair<Rule>) -> Term {
     let mut tele : VecDeque<Term> = pair.into_inner().map(parse_sterm).collect();

@@ -16,6 +16,7 @@ pub enum TypeError {
     TypeMismatch(Term, Term),
     IllFormed(Term),
     NoBody(Term),
+    NotGround(Term),
     HO(Term)
 }
 
@@ -35,6 +36,7 @@ impl TypeError {
             TypeError::TypeMismatch(ty, t) => t.pp(ctx)? + " does not have type " + &ty.pp(ctx)?,
             TypeError::IllFormed(t) => t.pp(ctx)? + " is ill-formed",
             TypeError::NoBody(t) => t.pp(ctx)? + " does not have a body",
+            TypeError::NotGround(t) => t.pp(ctx)? + " contains holes",
             TypeError::HO(t) => "Higher order instantiation in ".to_string() + &t.pp(ctx)?
         })
     }
