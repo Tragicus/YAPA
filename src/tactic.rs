@@ -13,7 +13,8 @@ pub enum Tactic {
     Exact(crate::parser::Term),
     Refine(crate::parser::Term),
     Apply(crate::parser::Term),
-    Intro(Vec<String>)
+    Intro(Vec<String>),
+    Assumption(),
 }
 
 impl Tactic {
@@ -76,6 +77,18 @@ impl Tactic {
                             Ok::<_, Error>(())
                         })
                     })?;
+                    Ok(())
+                }
+                Tactic::Assumption() => {
+                    goals[0].enter(&mut ctx.engine, |ctx, g| {
+                        let n = ctx.var.len();
+                        for i in 0..n {
+                            match ctx.instantiate_hole(&g, Term::Var(i)) {
+                                Ok(_) => { break; }
+                                _ => ()
+                            };
+                        }
+                    });
                     Ok(())
                 }
             }

@@ -127,6 +127,7 @@ fn parse_tactic(pair: Pair<Rule>) -> Tactic {
         Rule::refine => Tactic::Refine(parse_term(pair.into_inner().next().unwrap())),
         Rule::apply => Tactic::Apply(parse_term(pair.into_inner().next().unwrap())),
         Rule::intro => Tactic::Intro(pair.into_inner().next().unwrap().into_inner().map(|name| name.as_str().to_string()).collect()),
+        Rule::assumption => Tactic::Assumption(),
         _ => unreachable!(),
     }
 }
