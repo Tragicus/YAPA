@@ -7,6 +7,7 @@ use crate::goal::Goal;
 use crate::tactic::*;
 use crate::error::*;
 use std::collections::VecDeque;
+use std::iter::once;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -77,9 +78,9 @@ impl Command {
                 Ok(())
             }
             Command::Tac(tac) => {
-                tac.exec(ctx)?;
+                let mut newgoals = tac.exec(ctx)?;
                 let Status::Proofmode(_, _, _, ref mut goals) = ctx.status else { unreachable!() };
-                let mut fgoals : VecDeque<_> = goals.into_iter().filter(|g| ctx.engine.get_hole_body(&g.goal).unwrap().is_none()).map(|g| g.clone()).collect();
+                let mut fgoals : VecDeque<_> = goals.iter().take(1).chain(newgoals.iter()).chain(goals.iter().skip(1)).filter(|g| ctx.engine.get_hole_body(&g.goal).unwrap().is_none()).map(|g| g.clone()).collect();
                 std::mem::swap(goals, &mut fgoals);
                 Ok(())
             }

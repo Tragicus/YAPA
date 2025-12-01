@@ -106,7 +106,7 @@ fn parse_command(pair:Pair<Rule>) -> Command {
             Command::Define(name, ty.forall(tele.clone()), t.fun(tele))
         }
         Rule::proof => Command::Skip(),
-        Rule::tac => Command::Tac(parse_tactic(pair.into_inner().next().unwrap())),
+        Rule::tac => Command::Tac(parse_tactic(pair)),
         Rule::end_proof => {
             Command::Qed(match pair.into_inner().next().unwrap().as_rule() {
                 Rule::qed => false,
@@ -122,12 +122,19 @@ fn parse_command(pair:Pair<Rule>) -> Command {
 }
 
 fn parse_tactic(pair: Pair<Rule>) -> Tactic {
+    let tacs: VecDeque<_> = pair.into_inner().map(|stac| parse_simple_tactic(stac.into_inner().next().unwrap())).collect();
+    //TOTHINK: Why do I have to clone here?
+    if tacs.len() == 1 { tacs[0].clone() } else { Tactic::Seq(tacs) }
+}
+
+fn parse_simple_tactic(pair: Pair<Rule>) -> Tactic {
     match pair.as_rule() {
         Rule::exact => Tactic::Exact(parse_term(pair.into_inner().next().unwrap())),
         Rule::refine => Tactic::Refine(parse_term(pair.into_inner().next().unwrap())),
         Rule::apply => Tactic::Apply(parse_term(pair.into_inner().next().unwrap())),
         Rule::intro => Tactic::Intro(pair.into_inner().next().unwrap().into_inner().map(|name| name.as_str().to_string()).collect()),
         Rule::assumption => Tactic::Assumption(),
+        Rule::tac => parse_tactic(pair.into_inner().next().unwrap()),
         _ => unreachable!(),
     }
 }

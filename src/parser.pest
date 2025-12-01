@@ -15,7 +15,8 @@ end_proof = { qed | defined }
 qed = { "Qed" ~ "." }
 defined = { "Defined" ~ "." }
 
-tac = { exact ~ "." | refine ~ "." | apply ~ "." | intro ~ "." | assumption ~ "."}
+tac = { stac ~ (";" ~ stac)* ~ "." }
+stac = { "(" ~ tac ~ ")" | exact | refine | apply | intro | assumption }
 exact = { "exact" ~ term }
 refine = { "refine" ~ term }
 apply = { "apply" ~ term }
