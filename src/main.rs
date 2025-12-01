@@ -4,6 +4,8 @@ mod engine;
 mod command;
 mod parser;
 mod tactic;
+mod error;
+mod goal;
 
 use std::env;
 use std::io::Read;
@@ -17,6 +19,14 @@ fn main() {
     println!("Successful parse! Got {} commands.", cmds.len());
 
     let mut ctx = crate::command::Context::new();
-    for c in cmds { c.exec(&mut ctx); }
+    for c in cmds {
+        match c.exec(&mut ctx) {
+            Ok(_) => (),
+            Err(err) => {
+                println!("{}", err.pp(&mut ctx).unwrap());
+                break;
+            }
+        }
+    }
 }
 

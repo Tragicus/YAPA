@@ -260,35 +260,35 @@ impl Term {
     pub fn dest_var(self) -> Result<VarType, Error> {
         match self {
             Term::Var(v) => Ok(v),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAVar(self) })
+            _ => Err(Error::NotAVar(self))
         }
     }
 
     pub fn dest_const(self) -> Result<Name, Error> {
         match self {
             Term::Const(c) => Ok(c),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAConst(self) })
+            _ => Err(Error::NotAConst(self))
         }
     }
 
     pub fn dest_fun(self) -> Result<(Telescope, Term), Error> {
         match self {
             Term::Fun(false, tele, body) => Ok((tele, Rc::unwrap_or_clone(body))),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAFun(self) })
+            _ => Err(Error::NotAFun(self))
         }
     }
 
     pub fn dest_forall(self) -> Result<(Telescope, Term), Error> {
         match self {
             Term::Fun(true, tele, body) => Ok((tele, Rc::unwrap_or_clone(body))),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAForall(self) })
+            _ => Err(Error::NotAForall(self))
         }
     }
 
     pub fn dest_type(self) -> Result<Univ, Error> {
         match self {
             Term::Type(c) => Ok(c),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAType(self) })
+            _ => Err(Error::NotAType(self))
         }
     }
 }

@@ -6,7 +6,7 @@ toplevel = _{ SOI ~ (command)* ~ EOI }
 command = _{ ( print | check | end_proof | define | whd | stop | proof | tac ) }
 print = { "Print" ~ term ~ "." }
 check = { "Check" ~ term ~ "." }
-define = { ("def" | "Define" | "Definition") ~ name ~ type_annot ~ def_body ~ "." }
+define = { ("def" | "Define" | "Definition") ~ name ~ otele ~ type_annot ~ def_body ~ "." }
 whd = { "Whd" ~ term ~ "." }
 debug = { "Set" ~ "Debug" ~ "\"" ~ string ~ "\"" }
 stop = {  "Stop." }
@@ -15,17 +15,19 @@ end_proof = { qed | defined }
 qed = { "Qed" ~ "." }
 defined = { "Defined" ~ "." }
 
-tac = { exact ~ "." | refine ~ "." | apply ~ "."}
+tac = { exact ~ "." | refine ~ "." | apply ~ "." | intro ~ "."}
 exact = { "exact" ~ term }
 refine = { "refine" ~ term }
 apply = { "apply" ~ term }
+intro = { "intro" ~ names }
 
 def_body = { ":=" ~ term | "" }
 type_annot = { ":" ~ term | "" }
 
 term = { sterm ~ ("->" ~ sterm)* }
 
-tele = { tele_item+ }
+otele = { (tele_item | name)* }
+tele = { (tele_item | name)+ }
 tele_item = { "(" ~ names ~ ":" ~ term ~ ")" }
 
 sterm = { ( paren_term | fun | forall | ttype | tlet | name )+ }

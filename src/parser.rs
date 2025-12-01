@@ -32,6 +32,25 @@ pub enum Term {
 }
 
 impl Term {
+    pub fn forall_or_fun(self, forall: bool, mut tele: Telescope) -> Term {
+        if tele.len() == 0 { return self; }
+        match self {
+            Term::Fun(forall0, mut tele0, body) if forall0 == forall => {
+                tele.append(&mut tele0);
+                Term::Fun(forall, tele, body)
+            }
+            _ => Term::Fun(forall, tele, self.into())
+        }
+    }
+
+    pub fn forall(self, tele: Telescope) -> Term {
+        self.forall_or_fun(true, tele)
+    }
+
+    pub fn fun(self, tele: Telescope) -> Term {
+        self.forall_or_fun(false, tele)
+    }
+
     pub fn capture_vars(self, ctx: &mut Context) -> crate::engine::term::Term {
         fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, mut tele: I, body: Term) -> (crate::engine::term::Telescope, crate::engine::term::Term)
             where I: Iterator<Item = Binder> {
@@ -81,9 +100,10 @@ fn parse_command(pair:Pair<Rule>) -> Command {
         Rule::define => {
             let mut inner_rules = pair.into_inner();
             let name = inner_rules.next().unwrap().as_str().to_string();
+            let tele = parse_tele(inner_rules.next().unwrap());
             let ty = parse_type_annot(inner_rules.next().unwrap());
             let t = parse_def_body(inner_rules.next().unwrap());
-            Command::Define(name, ty, t)
+            Command::Define(name, ty.forall(tele.clone()), t.fun(tele))
         }
         Rule::proof => Command::Skip(),
         Rule::tac => Command::Tac(parse_tactic(pair.into_inner().next().unwrap())),
@@ -106,16 +126,23 @@ fn parse_tactic(pair: Pair<Rule>) -> Tactic {
         Rule::exact => Tactic::Exact(parse_term(pair.into_inner().next().unwrap())),
         Rule::refine => Tactic::Refine(parse_term(pair.into_inner().next().unwrap())),
         Rule::apply => Tactic::Apply(parse_term(pair.into_inner().next().unwrap())),
+        Rule::intro => Tactic::Intro(pair.into_inner().next().unwrap().into_inner().map(|name| name.as_str().to_string()).collect()),
         _ => unreachable!(),
     }
 }
 
 fn parse_tele(pair: Pair<Rule>) -> Telescope {
     pair.into_inner().map(|pair| {
-        let mut inner_rules = pair.into_inner();
-        let names = inner_rules.next().unwrap();
-        let ty = parse_term(inner_rules.next().unwrap());
-        names.into_inner().map(move |name| (name.as_str().to_string(), ty.clone(), None))
+        match pair.as_rule() {
+            Rule::name => vec![(pair.as_str().to_string(), Term::Const("_".to_string()), None)].into_iter(),
+            Rule::tele_item => {
+                let mut inner_rules = pair.into_inner();
+                let names = inner_rules.next().unwrap();
+                let ty = parse_term(inner_rules.next().unwrap());
+                names.into_inner().map(move |name| (name.as_str().to_string(), ty.clone(), None)).collect::<Vec<_>>().into_iter()
+            }
+            _ => unreachable!()
+        }
     }).flatten().collect()
 }
 

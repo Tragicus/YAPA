@@ -19,7 +19,7 @@ pub struct HoleContext {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Commit {
     PushHole(),
-    ReinstantiateHole(VarType, Term),
+    InstantiateHole(VarType, Option<Term>),
     PushHoleConstraint(VarType)
 }
 
@@ -76,15 +76,17 @@ impl Context {
     }
 
     pub fn find_var(&self, v: &VarType) -> Result<&(Name, Term, Option<Term>), Error> {
-        self.var.get(self.var.len() - *v - 1).map_or(Err(Error { ctx: self.clone(), err: TypeError::UnboundVar(v.clone()) }), |x| Ok(x))
+        if self.var.len() <= *v { Err(Error::UnboundVar(v.clone())) } else {
+            self.var.get(self.var.len() - *v - 1).map_or(Err(Error::UnboundVar(v.clone())), |x| Ok(x))
+        }
     }
 
     pub fn find_const(&self, v: &Name) -> Result<&(crate::kernel::term::Term, Option<crate::kernel::term::Term>), Error> {
-        self.cst.get(v).ok_or(Error { ctx: self.clone(), err: TypeError::UnboundConst(v.clone()) })
+        self.cst.get(v).ok_or(Error::UnboundConst(v.clone()))
     }
 
     pub fn find_hole(&self, v: &VarType) -> Result<&HoleContext, Error> {
-        self.hole.get(*v).map_or(Err(Error { ctx: self.clone(), err: TypeError::UnboundHole(v.clone()) }), |x| Ok(x))
+        self.hole.get(*v).map_or(Err(Error::UnboundHole(v.clone())), |x| Ok(x))
     }
 
     pub fn get_var_name(&self, v: &VarType) -> Result<&Name, Error> {
@@ -171,26 +173,28 @@ impl Context {
         //println!("instantiate_hole {:?} <- {:?}", tv, t);
         let tvty = tv.type_of(self)?;
         let ty = t.type_of(self)?;
-        if !unify(self, &tvty, &ty)? { return Err(Error { ctx: self.clone(), err: TypeError::TypeMismatch(tvty, t) }) };
+        if !unify(self, &tvty, &ty)? { return Err(Error::TypeMismatch(tvty, t)) };
         let (v, args) = tv.clone().behead();
         let v = v.dest_hole()?;
         let nargs = args.len();
         let (_, map) = args.iter().fold(Ok((1, HashMap::new())), |m, arg| {
             let (i, mut map) = m?;
-            let v = Rc::unwrap_or_clone(arg.clone()).whd(self, WhdFlags::default())?.dest_var().map_err(|_| Error { ctx: self.clone(), err: TypeError::HO(tv.clone()) })?;
+            let v = Rc::unwrap_or_clone(arg.clone()).whd(self, WhdFlags::default())?.dest_var().map_err(|_| Error::HO(tv.clone()))?;
             map.insert(v, if map.contains_key(&v) { None } else { Some(Term::Var(nargs - i)) });
             Ok((i + 1, map))
         })?;
         if t.free_vars().iter().all(|v| map.get(v).map(|v| v.clone()).flatten().is_some()) {
             //TODO: Am I sure that I get at least nargs binders?
-            let mut tele = if nargs == 0 { VecDeque::new() } else { let (tele, _) = self.get_hole_type(&v)?.clone().dest_forall()?; tele };
+            let mut tele = if nargs == 0 { VecDeque::new() } else {
+                let ty = self.get_hole_type(&v)?.clone();
+                let (tele, _) = ty.whd(self, WhdFlags::default())?.dest_forall()?; tele };
             tele.truncate(nargs);
             let h = self.hole.get_mut(v).expect("Anomaly: hole should exist.");
-            h.body.as_ref().map(|tv| self.commits.push(Commit::ReinstantiateHole(v, tv.clone())));
+            self.commits.push(Commit::InstantiateHole(v, h.body.clone()));
             h.body = Some(t.subst(|v| map.get(&v).map(|v| v.clone()).flatten().unwrap()).fun(tele));
             Ok(self)
         } else {
-            Err(Error { ctx: self.clone(), err: TypeError::HO(tv.clone()) })
+            Err(Error::HO(tv.clone()))
         }
     }
 
@@ -258,19 +262,20 @@ impl Context {
     }
 
     //FIXME: Find a better name.
-    pub fn save<T, E, F>(&mut self, f: F) -> Result<T, E>
-        where F: FnOnce(&mut Context) -> Result<T, E> {
-        let n = self.commits.len();
-        f(self).map_err(|e| {
-            loop {
-                if self.commits.len() == n { return e };
-                match self.commits.pop().unwrap() {
-                    Commit::PushHole() => { self.hole.pop(); },
-                    Commit::ReinstantiateHole(v, t) => { self.hole.get_mut(v).unwrap().body = Some(t); }
-                    Commit::PushHoleConstraint(v) => { self.hole.get_mut(v).unwrap().cstr.pop(); }
-                };
-            }
-        })
+    //Produces a commit of the context, to be used in restore
+    pub fn save(&mut self) -> usize {
+        self.commits.len()
+    }
+
+    //Backtracks the context to its state when the commit was produced
+    pub fn restore(&mut self, commit: usize) {
+        while self.commits.len() != commit {
+            match self.commits.pop().unwrap() {
+                Commit::PushHole() => { self.hole.pop(); },
+                Commit::InstantiateHole(v, t) => { self.hole.get_mut(v).unwrap().body = t; }
+                Commit::PushHoleConstraint(v) => { self.hole.get_mut(v).unwrap().cstr.pop(); }
+            };
+        }
     }
 
     pub fn reset_holes(&mut self) -> &Self {

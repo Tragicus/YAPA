@@ -30,11 +30,11 @@ impl Context {
     }
 
     pub fn find_var(&self, v: &VarType) -> Result<&(Name, Term, Option<Term>), Error> {
-        self.var.get(self.var.len() - *v - 1).map_or(Err(Error { ctx: self.clone(), err: TypeError::UnboundVar(v.clone()) }), |x| Ok(x))
+        self.var.get(self.var.len() - *v - 1).map_or(Err(Error::UnboundVar(v.clone())), |x| Ok(x))
     }
 
     pub fn find_const(&self, v: &Name) -> Result<&(Term, Term), Error> {
-        self.cst.get(v).ok_or(Error { ctx: self.clone(), err: TypeError::UnboundConst(v.clone()) })
+        self.cst.get(v).ok_or(Error::UnboundConst(v.clone()))
     }
 
     pub fn get_var_name(&self, v: &VarType) -> Result<&Name, Error> {

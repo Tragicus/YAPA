@@ -47,30 +47,38 @@ pub fn unify_rigid(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Erro
 pub fn unify_instantiate(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Error> {
     match ctx.instantiate_hole(t1, t2.clone()) {
         Ok(_) => Ok(true),
-        Err(Error { ctx: _, err: TypeError::HO(_) }) => Ok(false),
+        Err(Error::HO(_)) => Ok(false),
         Err(e) => Err(e)
     }
 }
 
-pub fn unify(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Error> {
-    //println!("{:?} =?= {:?}", t1, t2);
+// Main loop of the unification algorithm
+pub fn unify_loop(ctx: &mut Context, o1: &Term, o2: &Term, t1: &Term, t2: &Term) -> Result<bool, Error> {
+    //println!("{} =?= {}", t1.pp(ctx)?, t2.pp(ctx)?);
+    let ctx_commit = ctx.save();
     if unify_rigid(ctx, t1, t2)? { return Ok(true); }
-    if t2.may_reduce(ctx)? { let t2 = unify_reduce(ctx, t2.clone())?; return unify(ctx, t1, &t2) };
-    if t1.may_reduce(ctx)? { let t1 = unify_reduce(ctx, t1.clone())?; return unify(ctx, &t1, t2) };
+    ctx.restore(ctx_commit);
+    if t2.may_reduce(ctx)? { let t2 = unify_reduce(ctx, t2.clone())?; return unify_loop(ctx, o1, o2, t1, &t2) };
+    if t1.may_reduce(ctx)? { let t1 = unify_reduce(ctx, t1.clone())?; return unify_loop(ctx, o1, o2, &t1, t2) };
     Ok(match (t1.head(), t2.head()) {
         (Term::Hole(_), Term::Hole(_)) => {
-            if unify_instantiate(ctx, t2, t1)? { return Ok(true) };
-            if unify_instantiate(ctx, t1, t2)? { return Ok(true) };
+            //TODO: save ctx
+            if unify_instantiate(ctx, t2, o1)? { return Ok(true) };
+            ctx.restore(ctx_commit);
+            if unify_instantiate(ctx, t1, o2)? { return Ok(true) };
+            ctx.restore(ctx_commit);
             ctx.register_constraint(t2.clone(), t1.clone())?;
             true
         }
         (Term::Hole(_), _) => {
-            if unify_instantiate(ctx, t1, t2)? { return Ok(true) };
+            if unify_instantiate(ctx, t1, o2)? { return Ok(true) };
+            ctx.restore(ctx_commit);
             ctx.register_constraint(t1.clone(), t2.clone())?;
             true
         }
         (_, Term::Hole(_)) => {
-            if unify_instantiate(ctx, t2, t1)? { return Ok(true) };
+            if unify_instantiate(ctx, t2, o1)? { return Ok(true) };
+            ctx.restore(ctx_commit);
             ctx.register_constraint(t2.clone(), t1.clone())?;
             true
         }
@@ -78,12 +86,16 @@ pub fn unify(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Error> {
     })
 }
 
+pub fn unify(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Error> {
+    unify_loop(ctx, t1, t2, t1, t2)
+}
+
 impl Term {
     pub fn type_of(&self, ctx: &mut Context) -> Result<Term, Error> {
         fn check_let(ctx: &mut Context, b : &Term, ty: &Term) -> Result<(), Error> {
             let bty = b.type_of(ctx)?;
             if unify(ctx, ty, &bty)? { Ok(()) } else {
-            Err(Error { ctx: ctx.clone(), err: TypeError::TypeMismatch(b.clone(), ty.clone()) })}
+            Err(Error::TypeMismatch(b.clone(), ty.clone()))}
         }
         //println!("type_of {:?}", self);
         Ok(match self {
@@ -100,7 +112,7 @@ impl Term {
                     if unify(ctx, &ty, &argty)? { 
                         Ok(body.forall(tele).subst0(&**arg))
                     } else {
-                        Err(Error { ctx: ctx.clone(), err: TypeError::IllegalApplication(self.clone()) })
+                        Err(Error::IllegalApplication(self.clone()))
                     }
                 })?
             }

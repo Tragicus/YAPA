@@ -130,11 +130,15 @@ impl Term {
                 Term::Var(v) if flags.delta => {
                     match ctx.get_var_body(&v)?.clone() {
                         None => (false, Term::Var(v), args),
-                        Some(t) => if flags.once { (true, t, args) } else { aux(t, args, ctx, flags)? }
+                        Some(t) => {
+                            let (t, args) = t.apps(args).behead();
+                            if flags.once { (true, t, args) } else { aux(t, args, ctx, flags)? }
+                        }
                     }
                 }
                 Term::Const(ref c) if flags.delta => {
                     let hd = ctx.get_const_body(c)?.clone();
+                    let (hd, args) = hd.apps(args).behead();
                     let (_, hd, args) = if flags.once { (true, hd, args) } else { aux(hd, args, ctx, flags)? };
                     (true, hd, args)
                 }
@@ -180,7 +184,7 @@ impl Term {
             Term::Fun(_, _, _) => 1 < self.stack_len() || self.is_let(),
             Term::Var(v) => {
                 match ctx.get_var_body(&v) {
-                    Err(Error { ctx: _, err: TypeError::NoBody(_) }) => false,
+                    Err(Error::NoBody(_)) => false,
                     Err(e) => Err(e)?,
                     Ok(b) => b.is_some()
                 }

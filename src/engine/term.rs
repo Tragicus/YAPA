@@ -73,7 +73,7 @@ impl std::fmt::Display for Term {
             Term::App(args) => {
                 let mut it = args.iter();
                 it.next().map_or(Ok(()), |t| t.fmt_atom(f))?;
-                for t in it { t.fmt_atom(f)?; }
+                for t in it { write!(f, " ")?; t.fmt_atom(f)?; }
                 Ok(())
             }
             Term::Fun(forall, tele, body) => {
@@ -230,11 +230,11 @@ impl Term {
         })
     }
     pub fn pp<'a>(&self, ctx: &'a mut Context) -> Result<String, Error> {
-        Ok(match self {
-            Term::Var(i) => ctx.get_var_name(i)?.clone(),
-            Term::Const(s) => s.clone(),
+        Ok(match self.clone().whd(ctx, WhdFlags::empty())? {
+            Term::Var(i) => ctx.get_var_name(&i)?.clone(),
+            Term::Const(s) => s,
             Term::App(args) => {
-                let mut it = args.iter();
+                let mut it = args.into_iter();
                 let mut s = it.next().unwrap().pp_atom(ctx)?;
                 for t in it { s = s + " " + &t.pp_atom(ctx)?; }
                 s
@@ -242,11 +242,11 @@ impl Term {
             Term::Fun(forall, tele, body) => 
                 ctx.fold_telescope(|ctx, (v, ty, b), s| {
                     Ok(s? + &(" (".to_string() + v + " : " + &ty.pp(ctx)? + &b.as_ref().map_or(Ok("".to_string()), |b| Ok(" := ".to_owned() + &b.pp(ctx)?))? + ")"))
-                }, &mut tele.iter(), Ok((if *forall { "forall" } else { "fun" }).to_string()), |ctx, s| {
-                    Ok(s? + (if *forall { ", " } else { " => " }) + &body.pp(ctx)?)
+                }, &mut tele.iter(), Ok((if forall { "forall" } else { "fun" }).to_string()), |ctx, s| {
+                    Ok(s? + (if forall { ", " } else { " => " }) + &body.pp(ctx)?)
                 })?,
             Term::Type(u) => "Type@(".to_string() + &u.to_string() + ")",
-            Term::Hole(i) => "?".to_string() + &ctx.get_hole_name(i)?.clone()
+            Term::Hole(i) => "?".to_string() + &ctx.get_hole_name(&i)?.clone()
         })
     }
 
@@ -292,28 +292,28 @@ impl Term {
     pub fn dest_var(self) -> Result<VarType, Error> {
         match self {
             Term::Var(v) => Ok(v),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAVar(self) })
+            _ => Err(Error::NotAVar(self))
         }
     }
 
     pub fn dest_const(self) -> Result<Name, Error> {
         match self {
             Term::Const(c) => Ok(c),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAConst(self) })
+            _ => Err(Error::NotAConst(self))
         }
     }
 
     pub fn dest_fun(self) -> Result<(Telescope, Term), Error> {
         match self {
             Term::Fun(false, tele, body) => Ok((tele, Rc::unwrap_or_clone(body))),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAFun(self) })
+            _ => Err(Error::NotAFun(self))
         }
     }
 
     pub fn dest_forall(self) -> Result<(Telescope, Term), Error> {
         match self {
             Term::Fun(true, tele, body) => Ok((tele, Rc::unwrap_or_clone(body))),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAForall(self) })
+            _ => Err(Error::NotAForall(self))
         }
     }
 
@@ -336,7 +336,7 @@ impl Term {
                 //TODO: generate fresh universe
                 let u = Univ::exact(0);
                 if unify(ctx, &Term::Type(u.clone()), &t)? { Ok(u) } else {
-                    Err(Error { ctx: ctx.clone(), err: TypeError::NotAType(t) })
+                    Err(Error::NotAType(t))
                 }
             }
         }
@@ -345,7 +345,7 @@ impl Term {
     pub fn dest_hole(self) -> Result<VarType, Error> {
         match self {
             Term::Hole(i) => Ok(i),
-            _ => Err(Error { ctx: Context::new(), err: TypeError::NotAHole(self) })
+            _ => Err(Error::NotAHole(self))
         }
     }
 
@@ -373,7 +373,7 @@ impl Term {
                     .map(|(v, ty, b)| Ok::<crate::kernel::term::Binder, Error>((v, ty.to_kernel(ctx)?, b.map(|b| b.to_kernel(ctx)).transpose()?)))
                     .collect::<Result<_, Error>>()?,
                 Rc::unwrap_or_clone(body).to_kernel(ctx)?.into()),
-            Term::Hole(i) => ctx.get_hole_body(&i)?.clone().map_or(Err(Error { ctx: ctx.clone(), err: TypeError::NoBody(self) }), |b| b.clone().to_kernel(ctx))?
+            Term::Hole(i) => ctx.get_hole_body(&i)?.clone().map_or(Err(Error::NoBody(self)), |b| b.clone().to_kernel(ctx))?
         })
     }
 }

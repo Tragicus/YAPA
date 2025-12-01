@@ -45,13 +45,17 @@ impl Term {
                 Term::Var(v) if flags.delta => {
                     match ctx.get_var_body(&v)?.clone() {
                         None => (false, Term::Var(v), args),
-                        Some(t) => if flags.once { (true, t, args) } else { aux(t, args, ctx, flags)? }
+                        Some(t) => {
+                            let (t, args) = t.apps(args).behead();
+                            if flags.once { (true, t, args) } else { aux(t, args, ctx, flags)? }
+                        }
                     }
                 }
                 Term::Const(ref c) if flags.delta => {
                     match ctx.get_const_body(c)?.map(|hd| hd.clone()) {
                         None => (false, hd, args),
                         Some(hd) => {
+                            let (hd, args) = hd.apps(args).behead();
                             let (_, hd, args) = if flags.once { (true, hd, args) } else { aux(hd, args, ctx, flags)? };
                             (true, hd, args)
                         }
@@ -82,7 +86,11 @@ impl Term {
                 Term::Hole(i) => {
                     match ctx.get_hole_body(&i)?.clone() {
                         None => (false, Term::Hole(i), args),
-                        Some(t) => aux(t, args, ctx, flags)?
+                        Some(t) => {
+                            let (t, args) = t.apps(args).behead();
+                            let (_, t, args) = aux(t, args, ctx, &WhdFlags::empty().beta())?;
+                            aux(t, args, ctx, flags)?
+                        }
                     }
                 }
                 hd => (false, hd, args)
@@ -105,7 +113,7 @@ impl Term {
             Term::Fun(_, _, _) => self.stack_len() != 0 || self.is_let(),
             Term::Var(v) => {
                 match ctx.get_var_body(&v) {
-                    Err(Error { ctx: _, err: TypeError::NoBody(_) }) => false,
+                    Err(Error::NoBody(_)) => false,
                     Err(e) => Err(e)?,
                     Ok(b) => b.is_some()
                 }

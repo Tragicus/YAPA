@@ -55,7 +55,7 @@ impl Term {
         fn check_let(ctx: &mut Context, b : &Term, ty: &Term) -> Result<(), Error> {
             let bty = b.type_of(ctx)?;
             if unify(ctx, ty, &bty)? { Ok(()) } else {
-            Err(Error { ctx: ctx.clone(), err: TypeError::TypeMismatch(b.clone(), ty.clone()) })}
+            Err(Error::TypeMismatch(b.clone(), ty.clone()))}
         }
         //println!("type_of {:?}", self);
         Ok(match self {
@@ -72,7 +72,7 @@ impl Term {
                     if unify(ctx, &ty, &argty)? { 
                         Ok(body.forall(tele).subst0(&**arg))
                     } else {
-                        Err(Error { ctx: ctx.clone(), err: TypeError::IllegalApplication(self.clone()) })
+                        Err(Error::IllegalApplication(self.clone()))
                     }
                 })?
             }
