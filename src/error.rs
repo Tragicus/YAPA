@@ -7,7 +7,8 @@ pub enum Error {
     OpenGoals(),
     NoGoal(),
     InvalidCommand(),
-    Stop()
+    Stop(),
+    InvalidGeneralization(crate::engine::term::VarType, Option<crate::engine::term::VarType>),
 }
 
 impl From<crate::engine::error::Error> for Error {
@@ -31,7 +32,8 @@ impl Error {
             Error::OpenGoals() => "Open goals remain.".to_string(),
             Error::NoGoal() => "No such goal.".to_string(),
             Error::InvalidCommand() => "Invalid command".to_string(),
-            Error::Stop() => "Stop".to_string()
+            Error::Stop() => "Stop".to_string(),
+            Error::InvalidGeneralization(i, j) => "Cannot generalize over ".to_string() + &crate::engine::term::Term::Var(*i).pp(&mut ctx.engine)? + " as it is used in " + &j.map_or(Ok("the goal".to_string()), |j| crate::engine::term::Term::Var(j).pp(&mut ctx.engine))?,
         }))
     }
 }

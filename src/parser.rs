@@ -131,9 +131,10 @@ fn parse_simple_tactic(pair: Pair<Rule>) -> Tactic {
     match pair.as_rule() {
         Rule::exact => Tactic::Exact(parse_term(pair.into_inner().next().unwrap())),
         Rule::refine => Tactic::Refine(parse_term(pair.into_inner().next().unwrap())),
-        Rule::apply => Tactic::Apply(parse_term(pair.into_inner().next().unwrap())),
+        Rule::apply => Tactic::Apply(pair.into_inner().map(|t| parse_term(t)).collect()),
         Rule::intro => Tactic::Intro(pair.into_inner().next().unwrap().into_inner().map(|name| name.as_str().to_string()).collect()),
         Rule::assumption => Tactic::Assumption(),
+        Rule::clear => Tactic::Clear(pair.into_inner().next().unwrap().into_inner().map(|name| name.as_str().to_string()).collect()),
         Rule::tac => parse_tactic(pair.into_inner().next().unwrap()),
         _ => unreachable!(),
     }

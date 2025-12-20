@@ -16,12 +16,13 @@ qed = { "Qed" ~ "." }
 defined = { "Defined" ~ "." }
 
 tac = { stac ~ (";" ~ stac)* ~ "." }
-stac = { "(" ~ tac ~ ")" | exact | refine | apply | intro | assumption }
+stac = { "(" ~ tac ~ ")" | exact | refine | apply | intro | assumption | clear }
 exact = { "exact" ~ term }
 refine = { "refine" ~ term }
-apply = { "apply" ~ term }
+apply = { "apply" ~ term* }
 intro = { "intro" ~ names }
 assumption = { "assumption" }
+clear = { "clear" ~ names }
 
 def_body = { ":=" ~ term | "" }
 type_annot = { ":" ~ term | "" }

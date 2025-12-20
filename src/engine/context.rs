@@ -183,7 +183,7 @@ impl Context {
             map.insert(v, if map.contains_key(&v) { None } else { Some(Term::Var(nargs - i)) });
             Ok((i + 1, map))
         })?;
-        if t.free_vars().iter().all(|v| map.get(v).map(|v| v.clone()).flatten().is_some()) {
+        if t.free_vars(self).iter().all(|v| map.get(v).map(|v| v.clone()).flatten().is_some()) {
             //TODO: Am I sure that I get at least nargs binders?
             let mut tele = if nargs == 0 { VecDeque::new() } else {
                 let ty = self.get_hole_type(&v)?.clone();

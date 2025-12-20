@@ -5,13 +5,7 @@ use std::hash::RandomState;
 use std::collections::HashMap;
 
 pub fn iota(n: usize) -> Vec<usize> {
-    let mut v = vec![0; n];
-    if n != 0 {
-        for i in 0..n {
-            v[i] = i;
-        };
-    };
-    v
+    (0..n).collect()
 }
 
 // HashMap supporting shadowing

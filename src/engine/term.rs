@@ -6,6 +6,7 @@ use crate::kernel::reduction::WhdFlags;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashSet;
+use std::iter::Map;
 
 /* Abstractions for local and global variable names:
  * - local variables are represented using De Bruijn indices
@@ -191,34 +192,96 @@ impl Term {
         })
     }
 
-    //TOTHINK: Should I not reduce defined evars?
-    pub fn free_vars(&self) -> HashSet<VarType> {
-        fn aux(t: &Term, k: usize, fv: &mut HashSet<VarType>) -> () {
+    pub fn free_vars(&self, ctx: &mut Context) -> HashSet<VarType> {
+        fn aux(t: &Term, ctx: &mut Context, k: usize, fv: &mut HashSet<VarType>) -> () {
             match t {
                 Term::Var(v) => if k <= *v { fv.insert(*v - k); },
-                Term::App(args) => for t in args { aux(t, k, fv) },
+                Term::App(args) => {
+                    match t.head() {
+                        Term::Hole(_) if t.may_reduce(ctx).unwrap() => {
+                            let t = t.clone().whd(ctx, WhdFlags::empty()).unwrap();
+                            aux(&t, ctx, k, fv)
+                        }
+                        _ => { for t in args { aux(t, ctx, k, fv) } }
+                    } 
+                }
                 Term::Fun(_, tele, body) => {
                     let k = tele.iter().fold(k, |k, (_, ty, b)| {
-                        aux(ty, k, fv);
-                        b.as_ref().map(|b| aux(&b, k + 1, fv));
+                        aux(ty, ctx, k, fv);
+                        b.as_ref().map(|b| aux(&b, ctx, k + 1, fv));
                         k + 1
                     });
-                    aux(&*body, k, fv);
+                    aux(&*body, ctx, k, fv);
                 }
+                Term::Hole(v) => { ctx.get_hole_body(v).unwrap().clone().map(|t| aux(&t, ctx, k, fv)); },
                 _ => ()
             }
         }
         let mut fv = HashSet::new();
-        aux(self, 0, &mut fv);
+        aux(self, ctx, 0, &mut fv);
         fv
     }
 
-    pub fn occurs(&self, t : &Term) -> bool {
+    pub fn occurs(&self, ctx: &mut Context, t : &Term) -> bool {
         self == t ||
         match self {
-            Term::App(args) => !args.iter().all(|x| !x.occurs(t)),
-            Term::Fun(_, tele, body) => !tele.iter().all(|(_, ty, b)| !(ty.occurs(t) || b.as_ref().map_or(false, |b| b.occurs(t)))) || body.occurs(t),
+            Term::App(args) =>
+                match self.head() {
+                    Term::Hole(_) if self.may_reduce(ctx).unwrap() => 
+                        self.clone().whd(ctx, WhdFlags::empty()).unwrap().occurs(ctx, t),
+                    _ => !args.iter().all(|x| !x.occurs(ctx, t))
+                },
+            Term::Fun(_, tele, body) => !tele.iter().all(|(_, ty, b)| !(ty.occurs(ctx, t) || b.as_ref().map_or(false, |b| b.occurs(ctx, t)))) || body.occurs(ctx, t),
+            Term::Hole(v) => { ctx.get_hole_body(v).unwrap().clone().map_or(false, |b| b.occurs(ctx, t)) },
+            Term::Var(v) => { ctx.get_var_body(v).unwrap().clone().map_or(false, |b| b.occurs(ctx, t)) },
             _ => false
+        }
+    }
+
+    // Reduces (deeply) self so that no pattern in pats occurs in self.
+    pub fn eliminate_patterns(self, ctx: &mut Context, pats: &HashSet<Term>) -> Result<Term, Error> {
+        if pats.contains(&self) {
+            Err(Error::OccurCheck(self.clone(), self))
+        } else {
+            let r = match self {
+                Term::Var(v) => {
+                    let tv = ctx.get_var_body(&v)?.clone();
+                    if tv.as_ref().map_or(false, |b| pats.iter().any(|pat| b.occurs(ctx, pat))) {
+                        tv.unwrap().eliminate_patterns(ctx, pats)
+                    } else { Ok(Term::Var(v)) }
+                }
+                Term::App(_) =>
+                    match self.head() {
+                        Term::Hole(_) if self.may_reduce(ctx).unwrap() => 
+                            self.clone().whd(ctx, WhdFlags::empty()).unwrap().eliminate_patterns(ctx, pats),
+                        _ => Ok(Term::App(self.dest_app()?.into_iter().map(|x| Rc::unwrap_or_clone(x).eliminate_patterns(ctx, pats)).collect::<Result<Vec<_>, _>>()?.into_iter().map(|x| x.into()).collect()))
+                    },
+                Term::Fun(forall, tele, body) => {
+                    ctx.fold_telescope(|ctx, (v, t, b), tele| {
+                        let mut tele = tele?;
+                        let t = t.clone().eliminate_patterns(ctx, pats)?;
+                        let b = b.clone().map(|b| b.eliminate_patterns(ctx, pats)).transpose()?;
+                        tele.push_back((v.clone(), t, b));
+                        Ok(tele)
+                    }, &mut tele.iter(), Ok(VecDeque::new()), |ctx, tele|
+                    Ok(Term::Fun(forall, tele?, Rc::unwrap_or_clone(body).eliminate_patterns(ctx, pats)?.into())))
+                }
+                Term::Hole(v) => {
+                    let tv = ctx.get_hole_body(&v)?.clone();
+                    if tv.as_ref().map_or(false, |b| pats.iter().any(|pat| b.occurs(ctx, pat))) {
+                        tv.unwrap().eliminate_patterns(ctx, pats)
+                    } else { Ok(Term::Hole(v)) }
+                }
+                t => Ok(t)
+            };
+            match r {
+                Err(Error::OccurCheck(pat, t)) => {
+                    // Very unoptimized, I should remember the location of the pattern.
+                    let t = t.whd(ctx, WhdFlags::empty().beta().once())?;
+                    t.eliminate_patterns(ctx, pats)
+                }
+                r => r
+            }
         }
     }
 
@@ -302,6 +365,14 @@ impl Term {
             _ => Err(Error::NotAConst(self))
         }
     }
+
+    pub fn dest_app(self) -> Result<VecDeque<Rc<Term>>, Error> {
+        match self {
+            Term::App(args) => Ok(args),
+            _ => Err(Error::NotAnApp(self))
+        }
+    }
+
 
     pub fn dest_fun(self) -> Result<(Telescope, Term), Error> {
         match self {

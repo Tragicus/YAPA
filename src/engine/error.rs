@@ -8,6 +8,7 @@ pub enum Error {
     UnboundHole(VarType),
     NotAVar(Term),
     NotAConst(Term),
+    NotAnApp(Term),
     NotAFun(Term),
     NotAForall(Term),
     NotAType(Term),
@@ -17,7 +18,8 @@ pub enum Error {
     IllFormed(Term),
     NoBody(Term),
     NotGround(Term),
-    HO(Term)
+    HO(Term),
+    OccurCheck(Term, Term),
 }
 
 impl Error {
@@ -28,6 +30,7 @@ impl Error {
             Error::UnboundHole(i) => "Hole ".to_string() + &i.to_string() + " is unbound",
             Error::NotAVar(t) => t.pp(ctx)? + " is not a variable",
             Error::NotAConst(t) => t.pp(ctx)? + " is not a constant",
+            Error::NotAnApp(t) => t.pp(ctx)? + " is not an application",
             Error::NotAFun(t) => t.pp(ctx)? + " is not a function",
             Error::NotAForall(t) => t.pp(ctx)? + " is not a forall",
             Error::NotAType(t) => t.pp(ctx)? + " is not a type",
@@ -37,7 +40,8 @@ impl Error {
             Error::IllFormed(t) => t.pp(ctx)? + " is ill-formed",
             Error::NoBody(t) => t.pp(ctx)? + " does not have a body",
             Error::NotGround(t) => t.pp(ctx)? + " contains holes",
-            Error::HO(t) => "Higher order instantiation in ".to_string() + &t.pp(ctx)?
+            Error::HO(t) => "Higher order instantiation in ".to_string() + &t.pp(ctx)?,
+            Error::OccurCheck(pat, t) => "Pattern ".to_string() + &pat.pp(ctx)? + " occurs in " + &t.pp(ctx)?
         })
     }
 }

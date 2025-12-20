@@ -78,10 +78,11 @@ impl Command {
                 Ok(())
             }
             Command::Tac(tac) => {
-                let mut newgoals = tac.exec(ctx)?;
-                let Status::Proofmode(_, _, _, ref mut goals) = ctx.status else { unreachable!() };
-                let mut fgoals : VecDeque<_> = goals.iter().take(1).chain(newgoals.iter()).chain(goals.iter().skip(1)).filter(|g| ctx.engine.get_hole_body(&g.goal).unwrap().is_none()).map(|g| g.clone()).collect();
-                std::mem::swap(goals, &mut fgoals);
+                let Status::Proofmode(_, _, _, ref mut goals) = ctx.status else { Err(Error::NoGoal())? };
+                let mut goal = goals.pop_front().ok_or(Error::NoGoal())?;
+                let mut subgoals = tac.exec(&mut ctx.engine, goal)?;
+                subgoals.append(goals);
+                std::mem::swap(goals, &mut subgoals);
                 Ok(())
             }
             Command::Qed(transparent) => {
