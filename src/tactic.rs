@@ -21,7 +21,7 @@ pub enum Tactic {
 }
 
 pub fn exec_seq(tacs: &VecDeque<Tactic>, ctx: &mut crate::engine::context::Context, goal: Goal, i: usize) -> Result<VecDeque<Goal>, Error> {
-    Ok(if i == tacs.len() { VecDeque::new() } else {
+    Ok(if i == tacs.len() { VecDeque::from([goal]) } else {
         tacs[i].clone().exec(ctx, goal)?.into_iter().filter_map(|mut g| {
             if ctx.get_hole_body(&g.goal).unwrap().is_some() { None } else {
                 Some(exec_seq(tacs, ctx, g, i+1))
@@ -32,7 +32,7 @@ pub fn exec_seq(tacs: &VecDeque<Tactic>, ctx: &mut crate::engine::context::Conte
 
 impl Tactic {
     pub fn exec(self, ctx: &mut crate::engine::context::Context, mut goal: Goal) -> Result<VecDeque<Goal>, Error> {
-        match self {
+        let subgoals = match self {
             Tactic::Exact(t) => {
                 goal.enter(ctx, |ctx, g| {
                     let t = t.capture_vars(ctx);
@@ -70,7 +70,6 @@ impl Tactic {
                             loop {
                                 let ty = t.type_of(ctx)?;
                                 if crate::engine::typing::unify(ctx, &ty, &tg)? {
-                                    println!("refining {}\n", t.pp(ctx)?);
                                     newgoals = t.collect_goals(ctx)?.into_iter().collect();
                                     newgoals.make_contiguous().sort();
                                     ctx.instantiate_hole(&g, t)?;
@@ -128,7 +127,10 @@ impl Tactic {
                         let mut hyps = hyps.into_iter().collect::<VecDeque<_>>();
                         hyps.make_contiguous().sort();
                         let tg = tg.subst(|i| {
-                            let hi = hyps.binary_search(&i).expect_err("Wow, how did you get here?");
+                            // i can still appear in tg as an argument of a defined hole.
+                            // This is an optimization that delays the unfolding of such holes.
+                            // FIXME: Do I not risk producing ill-typed terms?
+                            let hi = hyps.binary_search(&i).err().unwrap_or(0);
                             Term::Var(i - hi)
                         });
                         std::mem::swap(&mut vars, &mut ctx.var);
@@ -155,6 +157,7 @@ impl Tactic {
                 Ok(VecDeque::new())
             }
             Tactic::Seq(tacs) => exec_seq(&tacs, ctx, goal, 0),
-        }
+        }?;
+        Ok(subgoals.into_iter().filter(|g| !ctx.get_hole_body(&g.goal).map_or(false, |x| x.is_some())).collect())
     }
 }

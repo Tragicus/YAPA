@@ -60,13 +60,18 @@ impl Goal {
 
     pub fn pp(&self, ctx: &mut crate::engine::context::Context) -> Result<String, Error> {
         let tg = self.target(ctx).type_of(ctx)?.whd(ctx, WhdFlags::empty().beta())?;
-        let s = ctx.var.clone().into_iter();
-        let (s, ctx) = s.fold(Ok(("".to_string(), ctx)), |s, (v, t, b)| {
-            let (s, ctx) = s?;
-            let st = t.pp(ctx)?;
-            Ok((s + &v + " : " + &st + &b.map_or(Ok("".to_string()), |b| Ok(" := ".to_string() + &b.pp(ctx)?))? + "\n", ctx))
-        })?;
-        Ok(s + "\n==========================\n\n" + &tg.pp(ctx)? + "\n")
+        let mut vars = VecDeque::new();
+        std::mem::swap(&mut vars, &mut ctx.var);
+        let r = ctx.fold_telescope(|ctx, (v, ty, b), s| {
+            let s = s?;
+            let st = ty.pp(ctx)?;
+            Ok(s + &v + " : " + &st + &b.as_ref().map_or(Ok("".to_string()), |b| Ok(" := ".to_string() + &b.pp(ctx)?))? + "\n")
+        }, &mut vars.iter(), Ok("".to_string()), |ctx, s| {
+            let s = s?;
+            Ok(s + "\n==========================\n\n" + &tg.pp(ctx)? + "\n")
+        });
+        std::mem::swap(&mut vars, &mut ctx.var);
+        r
     }
 }
 

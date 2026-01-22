@@ -24,9 +24,15 @@ fn main() {
             Ok(_) => (),
             Err(err) => {
                 println!("{}", err.pp(&mut ctx).unwrap());
-                break;
+                return;
             }
         }
+    }
+
+    if let crate::command::Status::Proofmode(_, _, _, goals) = ctx.status {
+        if goals.len() == 0 {} else {
+            println!("{}", goals[0].pp(&mut ctx.engine).expect("Unable to print first goal"))
+        };
     }
 }
 
