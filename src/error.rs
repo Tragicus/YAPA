@@ -1,3 +1,4 @@
+use crate::utils::*;
 use crate::command::Context;
 use crate::command::Status;
 
@@ -8,7 +9,7 @@ pub enum Error {
     NoGoal(),
     InvalidCommand(),
     Stop(),
-    InvalidGeneralization(crate::engine::term::VarType, Option<crate::engine::term::VarType>),
+    InvalidGeneralization(VarType, Option<VarType>),
 }
 
 impl From<crate::engine::error::Error> for Error {

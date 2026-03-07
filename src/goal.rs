@@ -1,3 +1,4 @@
+use crate::utils::*;
 use crate::engine::term::*;
 use crate::engine::error::*;
 use crate::kernel::reduction::WhdFlags;

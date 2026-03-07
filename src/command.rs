@@ -109,7 +109,7 @@ impl Command {
                 let Status::Proofmode(_, _, _, ref mut goals) = ctx.status else { Err(Error::NoGoal())? };
                 let mut goal = goals.pop_front().ok_or(Error::NoGoal())?;
                 let mut subgoals = tac.exec(&mut ctx.engine, goal)?;
-                // N.B. Little hack to avoid a clone.
+                // N.B. Little hack to turn goals into an owned value.
                 let mut ogoals = VecDeque::new();
                 std::mem::swap(goals, &mut ogoals);
                 subgoals.append(&mut ogoals.into_iter().filter(|g| !ctx.engine.get_hole_body(&g.goal).map_or(false, |x| x.is_some())).collect());

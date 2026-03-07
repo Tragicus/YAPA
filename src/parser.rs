@@ -172,7 +172,7 @@ fn parse_sterm_atom(pair: Pair<Rule>) -> Term {
             let body = parse_term(inner_rules.next().unwrap());
             Term::Fun(true, tele, Box::new(body))
         }
-        Rule::ttype => Term::Type(Univ::exact(0)),
+        Rule::ttype => Term::Type(Univ::set()),
         Rule::tlet => {
             let mut inner_rules = pair.into_inner();
             let name = inner_rules.next().unwrap().as_str().to_string();
@@ -240,13 +240,13 @@ mod tests {
 
     #[test]
     fn test_subst() {
-        assert_eq!(Var(0).subst(|i| if i == 0 { Some(Type(Univ::exact(0))) } else { None }), Type(Univ::exact(0)));
+        assert_eq!(Var(0).subst(|i| if i == 0 { Some(Type(Univ::set())) } else { None }), Type(Univ::set()));
         assert_eq!(
-            App(VecDeque::from([Var(0).into(), Const("y".to_string()).into()])).subst(|i| if i == 0 { Some(Type(Univ::exact(0))) } else { None }),
-            App(VecDeque::from([Type(Univ::exact(0)).into(), Const("y".to_string()).into()])));
+            App(VecDeque::from([Var(0).into(), Const("y".to_string()).into()])).subst(|i| if i == 0 { Some(Type(Univ::set())) } else { None }),
+            App(VecDeque::from([Type(Univ::set()).into(), Const("y".to_string()).into()])));
         assert_eq!(
-            App(VecDeque::from([Const("y".to_string()).into(), Var(0).into()])).subst(|i| if i == 0 { Some(Type(Univ::exact(0))) } else { None }),
-            App(VecDeque::from([Const("y".to_string()).into(), Type(Univ::exact(0)).into()])));
+            App(VecDeque::from([Const("y".to_string()).into(), Var(0).into()])).subst(|i| if i == 0 { Some(Type(Univ::set())) } else { None }),
+            App(VecDeque::from([Const("y".to_string()).into(), Type(Univ::set()).into()])));
                        
     }
 }

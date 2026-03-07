@@ -1,3 +1,4 @@
+use crate::utils::*;
 use super::univ::*;
 use super::context::*;
 use super::error::*;
@@ -9,7 +10,7 @@ use std::collections::HashSet;
  * - local variables are represented using De Bruijn indices
  * - global variables are represented using strings
  */
-pub type VarType = usize;
+//pub type VarType = usize;
 pub type Name = String;
 
 /* A binder is given as a variable name, its type, and its body in case of a let. */

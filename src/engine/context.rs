@@ -1,3 +1,4 @@
+use crate::utils::*;
 use crate::kernel::univ::*;
 use super::term::*;
 use super::error::*;
@@ -156,7 +157,7 @@ impl Context {
         };
         let mut ty = ty.unwrap_or_else(|| {
             let t = Term::Hole(self.hole.len()).apps(args.clone());
-            let mut ty = Term::Type(Univ::exact(0));
+            let mut ty = Term::Type(Univ::set());
             if with_ctx { ty = ty.forall(self.var.clone().into_iter().collect()) };
             self.hole.push(HoleContext { name: v.clone() + "_ty", ty: ty, body: None, cstr: Vec::new() });
             self.commits.push(Commit::PushHole());

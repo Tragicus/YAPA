@@ -142,7 +142,7 @@ impl Term {
                 }, &mut tele.iter(), Ok(VecDeque::new()), |ctx, univs| {
                     let univs = univs?;
                     let v = (**body).clone().type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
-                    Ok(Term::Type(univs.iter().fold(v, |v, u| u.max(&v))))
+                    Ok(Term::Type(univs.into_iter().fold(v, |v, u| u.max(v))))
                 })?
             }
             Term::Type(u) => Term::Type(u.clone().succ()),
