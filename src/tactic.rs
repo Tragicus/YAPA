@@ -22,7 +22,7 @@ pub enum Tactic {
 
 pub fn exec_seq(tacs: &VecDeque<Tactic>, ctx: &mut crate::engine::context::Context, goal: Goal, i: usize) -> Result<VecDeque<Goal>, Error> {
     Ok(if i == tacs.len() { VecDeque::from([goal]) } else {
-        tacs[i].clone().exec(ctx, goal)?.into_iter().filter_map(|mut g| {
+        tacs[i].clone().exec(ctx, goal)?.into_iter().filter_map(|g| {
             if ctx.get_hole_body(&g.goal).unwrap().is_some() { None } else {
                 Some(exec_seq(tacs, ctx, g, i+1))
             }
@@ -66,7 +66,7 @@ impl Tactic {
                         Ok(goal.enter(ctx, |ctx, g| {
                             let mut t = t.capture_vars(ctx);
                             let tg = g.type_of(ctx)?;
-                            let mut newgoals = VecDeque::new();
+                            let mut newgoals: VecDeque<_>;
                             loop {
                                 let ty = t.type_of(ctx)?;
                                 if crate::engine::typing::unify(ctx, &ty, &tg)? {

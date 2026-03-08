@@ -1,5 +1,5 @@
 use crate::utils::*;
-use crate::kernel::univ::*;
+use crate::kernel::univ::Univ;
 use super::context::*;
 use super::error::*;
 use super::typing::*;
@@ -277,9 +277,12 @@ impl Term {
             };
             match r {
                 Err(Error::OccurCheck(pat, t)) => {
-                    // Very unoptimized, I should remember the location of the pattern.
-                    let t = t.whd(ctx, WhdFlags::empty().beta().once())?;
-                    t.eliminate_patterns(ctx, pats)
+                    // Very unoptimized, I should remember the location of the pattern and check if
+                    // progress is made during reduction.
+                    let t0 = t.clone().whd(ctx, WhdFlags::empty().beta().once())?;
+                    if t == t0 { Err(Error::OccurCheck(pat, t)) } else {
+                        t.eliminate_patterns(ctx, pats)
+                    }
                 }
                 r => r
             }

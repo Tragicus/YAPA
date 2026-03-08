@@ -1,5 +1,5 @@
 use crate::utils::*;
-use super::univ::*;
+use super::univ::Univ;
 use super::context::*;
 use super::error::*;
 use std::rc::Rc;

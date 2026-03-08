@@ -107,7 +107,7 @@ impl Command {
             Command::Tac(tac) => {
                 // N.B. We do not enter goal0 since the tactic will enter it itself.
                 let Status::Proofmode(_, _, _, ref mut goals) = ctx.status else { Err(Error::NoGoal())? };
-                let mut goal = goals.pop_front().ok_or(Error::NoGoal())?;
+                let goal = goals.pop_front().ok_or(Error::NoGoal())?;
                 let mut subgoals = tac.exec(&mut ctx.engine, goal)?;
                 // N.B. Little hack to turn goals into an owned value.
                 let mut ogoals = VecDeque::new();

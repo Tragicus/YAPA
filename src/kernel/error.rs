@@ -1,4 +1,5 @@
 use crate::utils::*;
+use crate::kernel::univ::{Sort, Univ};
 use super::term::*;
 use super::context::*;
 
@@ -14,7 +15,11 @@ pub enum Error {
     IllegalApplication(Term),
     TypeMismatch(Term, Term),
     IllFormed(Term),
-    NoBody(Term)
+    NoBody(Term),
+    UnboundSort(VarType),
+    UnboundUniv(VarType),
+    SortInconsistency(Sort, Sort),
+    UnivInconsistency(Univ, Univ),
 }
 
 impl Error {
@@ -31,6 +36,10 @@ impl Error {
             Error::TypeMismatch(ty, t) => t.pp(ctx)? + " does not have type " + &ty.pp(ctx)?,
             Error::IllFormed(t) => t.pp(ctx)? + " is ill-formed",
             Error::NoBody(t) => t.pp(ctx)? + " does not have a body",
+            Error::UnboundSort(i) => "Sort s_".to_string() + &i.to_string() + " is unbound",
+            Error::UnboundUniv(i) => "Universe u_".to_string() + &i.to_string() + " is unbound",
+            Error::SortInconsistency(s1, s2) => "Cannot have ".to_string() + &s1.to_string() + " < " + &s2.to_string(),
+            Error::UnivInconsistency(u1, u2) => "Cannot have ".to_string() + &u1.to_string() + " <= " + &u2.to_string(),
         })
     }
 }
