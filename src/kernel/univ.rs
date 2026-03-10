@@ -22,10 +22,11 @@ pub enum Sort {
 }
 
 /* A level is the maximum of a family of shifted level variables.
- * Variable `0` stands for the bottom of the hierarchy. */
+ * Variable `0` stands for the bottom of the hierarchy.
+ * We allow shifting down to make the theory well-behaved. */
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Level {
-    vars: BTreeMap<VarType, usize>
+    vars: BTreeMap<VarType, isize>
 }
 
 /* A universe is given by a sort and a level. */
@@ -36,8 +37,8 @@ pub struct Univ {
 }
 
 impl Level {
-    /* shift a level by a natural number. */
-    pub fn add(mut self, i: usize) -> Self {
+    /* shift a level by an integer. */
+    pub fn add(mut self, i: isize) -> Self {
         self.vars = self.vars.into_iter().map(|(v, u)| (v, u + i)).collect();
         self
     }
@@ -52,11 +53,55 @@ impl Level {
         self.vars = merge_map(self.vars, |_, u, u0| std::cmp::max(u, u0), other.vars);
         self
     }
+
+    /* Weak comparison, where u <= v iff u <= v pointwise.
+     * This may return Less or Greater even when assignations do not enforce said inequality. */
+    pub fn wcmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let mut cmp = None;
+        let mut assign = |x| {
+            if cmp == None {
+                cmp = Some(x);
+            } else if cmp != Some(x) {
+                return Err(());
+            }
+            Ok(())
+        };
+        let mut it = self.vars.iter().peekable();
+        let mut it2 = other.vars.iter().peekable();
+        loop {
+            match (it.peek(), it2.peek()) {
+                (None, None) => { return Some(cmp.unwrap_or(std::cmp::Ordering::Equal)); },
+                (None, _) => { return Some(cmp.unwrap_or(std::cmp::Ordering::Less)); },
+                (_, None) => { return Some(cmp.unwrap_or(std::cmp::Ordering::Greater)); },
+                (Some((u, n)), Some((v, m))) => {
+                    match u.cmp(v) {
+                        std::cmp::Ordering::Less => {
+                            assign(std::cmp::Ordering::Greater).ok()?;
+                            it.next();
+                        }
+                        std::cmp::Ordering::Greater => {
+                            assign(std::cmp::Ordering::Less).ok()?;
+                            it2.next();
+                        }
+                        std::cmp::Ordering::Equal => {
+                            match n.cmp(m) {
+                                std::cmp::Ordering::Less => { assign(std::cmp::Ordering::Less).ok()?; }
+                                std::cmp::Ordering::Greater => { assign(std::cmp::Ordering::Greater).ok()?; }
+                                std::cmp::Ordering::Equal => { () }
+                            }
+                            it.next();
+                            it2.next();
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Univ {
     /* shift a universe by a natural number. */
-    pub fn add(mut self, i: usize) -> Self {
+    pub fn add(mut self, i: isize) -> Self {
         if i == 0 { return self; };
         self.sort = Sort::Type();
         self.level = self.level.add(i);
@@ -104,7 +149,7 @@ impl std::fmt::Display for Sort {
 
 impl std::fmt::Display for Level {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let fmt_atom = |f: &mut std::fmt::Formatter<'_>, v: (&VarType, &usize)| {
+        let fmt_atom = |f: &mut std::fmt::Formatter<'_>, v: (&VarType, &isize)| {
             let (v, n) = v;
             if *v == 0 { write!(f, "{}", n) } else {
                 if *n == 0 { write!(f, "u_{}", v) } else {
@@ -143,14 +188,14 @@ impl std::fmt::Display for Univ {
  * - a context of sorts as a function which associates to each sort variable its lower and upper
  *   bounds and the set of sort variables that are larger than it, according to the order
  *   SProp < Prop < Type,
- * - a context of levels as a function which associates to each level variable v the set of
- *   pairs (n, l) such that v + n <= l.
+ * - a context of levels as a function which associates to each level variable v the set of its
+ *   upper bounds.
  *   In particular, with v the 0 level variable, we have v <= w for every level variable w.
  * - a model for the previous set of constraints. */
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context {
     sorts: BTreeMap<VarType, (Sort, Sort, HashSet<VarType>)>,
-    levels: BTreeMap<VarType, Vec<(usize, Level)>>,
+    levels: BTreeMap<VarType, Vec<Level>>,
     model: BTreeMap<VarType, usize>,
 }
 
@@ -160,7 +205,7 @@ impl Context {
     pub fn new() -> Context {
         Context {
             sorts: BTreeMap::new(),
-            levels: BTreeMap::from([(0, vec![])]),
+            levels: BTreeMap::from([(0, Vec::new())]),
             model: BTreeMap::from([(0, 0)])
         }
     }
@@ -175,8 +220,8 @@ impl Context {
         let u = self.sorts.last_key_value().map_or(0, |(u, _)| u + 1);
         self.levels.insert(u.clone(), vec![]);
         self.model.insert(u.clone(), 0);
-        let cstrs0 = self.levels.get_mut(&0).unwrap();
-        cstrs0.push((0, Level { vars: BTreeMap::from([(u.clone(), 0)]) }));
+        let ubs = self.levels.get_mut(&0).unwrap();
+        ubs.push(Level { vars: BTreeMap::from([(u.clone(), 0)]) });
         u
     }
 
@@ -208,7 +253,7 @@ impl Context {
     }
 
     /* Adding a constraint [u1 <= u2] to the context of universes. */
-    pub fn add_univ_constraint(&mut self, u1: Univ, u2: Univ) -> Result<&mut Self, Error> {
+    pub fn add_constraint(&mut self, u1: Univ, u2: Univ) -> Result<&mut Self, Error> {
         // Let's destruct u1 and u2.
         let Univ { sort: s1, level: u1 } = u1;
         let Univ { sort: s2, level: u2 } = u2;
@@ -221,23 +266,26 @@ impl Context {
          * We compute the set [updt] of level variables for which we add a constraint. */ 
         let mut updt = HashSet::new();
         u1.clone().vars.into_iter().map(|(u, n)| {
-            let cstrs = self.levels.get_mut(&u).ok_or(Error::UnboundUniv(u))?;
+            let u2 = u2.clone().add(-n);
+            let ubs = self.levels.get_mut(&u).ok_or(Error::UnboundUniv(u))?;
             let mut ditch = false;
-            *cstrs = cstrs.iter().filter(|(m, v)| {
+            *ubs = ubs.iter().filter(|v| {
                 if ditch { true } else {
-                    // If v + n <= u2 + m, u2 - n is redundant.
-                    if v.vars.iter().all(|(i, k)| u2.vars.get(i).map_or(false, |j| k + n <= j + m)) {
-                        ditch = true;
-                        true
-                    } else {
-                        // If u2 + m <= v + n, v - m becomes redundant.
-                        !u2.vars.iter().all(|(i, k)| v.vars.get(i).map_or(false, |j| k + m <= j + n))
+                    match v.wcmp(&u2) {
+                        None => { true }
+                        // If v <= u2 , u2 is redundant.
+                        Some(x) if x != std::cmp::Ordering::Greater => {
+                            ditch = true;
+                            true
+                        }
+                        // If u2 <= v , v becomes redundant.
+                        _ => { false }
                     }
                 }
             }).map(|x| x.clone()).collect();
             if !ditch {
                 updt.insert(u);
-                cstrs.push((n, u2.clone()));
+                ubs.push(u2);
             };
             Ok(())
         }).collect::<Result<(), _>>()?;
@@ -252,19 +300,15 @@ impl Context {
 
             let mut done = true;
 
-            for (u, cstrs) in self.levels.iter().filter(|(u, _)| dom.contains(&u)) {
-                for (n, v) in  cstrs.iter() {
-                    let _ = v.vars.iter().map(|(m, v)| {
-                        let kv = self.model.get(&v).unwrap();
-                        if *kv < *m { Err(()) } else { Ok(kv - m) }
-                    }).collect::<Result<Vec<_>, _>>().map(|it| {
-                        let k = it.into_iter().min().unwrap();
-                        let ku = self.model.get(&u).unwrap();
-                        if *ku < k + n {
-                            self.model.insert(u.clone(), k + n);
-                            done = false;
-                        }
-                    });
+            for (u, ubs) in self.levels.iter().filter(|(u, _)| dom.contains(&u)) {
+                for v in ubs.iter() {
+                    let k = v.vars.iter().map(|(v, m)| {
+                        (*self.model.get(&v).unwrap() as isize) - m
+                    }).min().unwrap();
+                    if k <= 0 || *self.model.get(&u).unwrap() < (k as usize) {
+                        self.model.insert(u.clone(), k as usize);
+                        done = false;
+                    };
                 }
             }
 
@@ -282,20 +326,15 @@ impl Context {
         let mut n = 0;
 
         loop {
-            for (u, cstrs) in self.levels.iter().filter(|(u, _)| dom.contains(&u)) {
-                for (n, v) in  cstrs.iter() {
-                    let _ = v.vars.iter().map(|(m, v)| {
-                        if !dom.contains(&v) { return Err(()) };
-                        let kv = self.model.get(&v).unwrap();
-                        if *kv < *m { Err(()) } else { Ok(kv - m) }
-                    }).collect::<Result<Vec<_>, _>>().map(|it| {
-                        let k = it.into_iter().min().unwrap();
-                        let ku = self.model.get(&u).unwrap();
-                        if *ku < k + n {
-                            self.model.insert(u.clone(), k + n);
-                            updt.insert(u.clone());
-                        }
-                    });
+            for (u, ubs) in self.levels.iter().filter(|(u, _)| dom.contains(&u)) {
+                for v in ubs.iter() {
+                    let k = v.vars.iter().map(|(v, m)| {
+                        (*self.model.get(&v).unwrap() as isize) - m
+                    }).min().unwrap();
+                    if k <= 0 || *self.model.get(&u).unwrap() < k as usize {
+                        self.model.insert(u.clone(), k as usize);
+                        updt.insert(u.clone());
+                    };
                 }
             }
 
@@ -313,8 +352,35 @@ impl Context {
      * model of self's constraints. */
     // TODO: Check if only considering the updated constraints in the first pass is useful.
     fn saturate_model(&mut self/*, updt: HashSet<VarType>*/) -> Result<&mut Self, HashSet<VarType>> {
-
         let dom = self.model.iter().map(|(u, _)| u.clone()).collect();
         self.saturate_over(&dom)
+    }
+
+    /* Removes a level variable from the context, returning a minimal level that may be equal to
+     * that level variable according to the current constraints. */
+    pub fn minimize_level(&mut self, u: VarType) -> Level {
+        let mut lb = Level { vars: BTreeMap::new() };
+
+        for v in self.model.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>() {
+            if v == u { continue; }
+            for i in 0..(self.levels.get(&v).unwrap().len()) {
+                let w = self.levels.get_mut(&v).unwrap().get_mut(i).unwrap();
+                if !w.vars.contains_key(&u) { continue; }
+                let n = w.vars.remove(&u).unwrap();
+                let w = w.clone();
+                self.levels.get_mut(&u).unwrap().push(w);
+                let model = self.model.clone();
+                if !self.saturate_model().is_ok() {
+                    self.model = model.clone();
+                    self.levels.get_mut(&u).unwrap().pop();
+                    let w = self.levels.get_mut(&v).unwrap().get_mut(i).unwrap();
+                    let mut w0 = Level { vars: BTreeMap::from([(v.clone(), n)]) };
+                    std::mem::swap(w, &mut w0);
+                    lb = lb.max(w0.succ());
+                }
+            }
+        }
+
+        lb
     }
 }
