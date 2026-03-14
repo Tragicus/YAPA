@@ -20,6 +20,7 @@ pub enum Error {
     UnboundUniv(VarType),
     SortInconsistency(Sort, Sort),
     UnivInconsistency(Univ, Univ),
+    PrintingError(std::fmt::Error),
 }
 
 impl Error {
@@ -40,6 +41,7 @@ impl Error {
             Error::UnboundUniv(i) => "Universe u_".to_string() + &i.to_string() + " is unbound",
             Error::SortInconsistency(s1, s2) => "Cannot have ".to_string() + &s1.to_string() + " < " + &s2.to_string(),
             Error::UnivInconsistency(u1, u2) => "Cannot have ".to_string() + &u1.to_string() + " <= " + &u2.to_string(),
+            Error::PrintingError(pp) => pp.to_string(),
         })
     }
 }

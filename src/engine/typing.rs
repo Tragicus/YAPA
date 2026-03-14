@@ -27,7 +27,14 @@ fn unify_stacks<'a>(ctx: &'a mut Context, sk1: &VecDeque<Rc<Term>>, sk2: &VecDeq
 pub fn unify_rigid(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Error> {
     Ok(t1.stack_len() == t2.stack_len() && (match (t1.head(), t2.head()) {
         (Term::Var(v), Term::Var(w)) => v == w,
-        (Term::Const(c1), Term::Const(c2)) => c1 == c2,
+        // This updates the model every time we add a constraint. Maybe I should add them all at
+        // once and update later, but then what is the error message?
+        (Term::Const(c1, s1, u1), Term::Const(c2, s2, u2)) =>
+            c1 == c2 &&
+            s1.len() == s2.len() &&
+            u1.len() == u2.len() &&
+            s1.iter().zip(s2.iter()).map(|(s1, s2)| { ctx.add_sort_constraint(s1.clone(), s2.clone())?; Ok::<_, Error>(()) }).collect::<Result<(), _>>().map(|_| true)? &&
+            u1.iter().zip(u2.iter()).map(|(u1, u2)| { ctx.add_level_constraint(u1.clone(), u2.clone())?; Ok::<_, Error>(()) }).collect::<Result<(), _>>().map(|_| true)?,
         (Term::Type(_), Term::Type(_)) => true,
         (Term::Fun(forall1, tele1, body1), Term::Fun(forall2, tele2, body2)) if forall1 == forall2 => {
             let mut tele1 = tele1.clone();
@@ -100,7 +107,7 @@ impl Term {
         //println!("type_of {:?}", self);
         Ok(match self {
             Term::Var(v) => ctx.get_var_type(v)?.clone(),
-            Term::Const(c) => ctx.get_const_type(c)?.clone(),
+            Term::Const(c, s, u) => ctx.get_const_type(c)?.clone().subst_univ(&s, &u)?,
             Term::App(args) => {
                 let mut args = args.iter();
                 let f = args.next().unwrap();
@@ -117,18 +124,18 @@ impl Term {
                 })?
             }
             Term::Fun(false, tele, body) => {
-                ctx.fold_telescope(|ctx, (_, ty, b), ok| {
+                ctx.fold_telescope(|ctx, (_, ty, b), ok: Result<_, Error>| {
                     let ok = ok?;
                     ty.type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
                     b.as_ref().map_or(Ok(()), |b| check_let(ctx, &b, ty))?;
                     Ok(ok)
                 }, &mut tele.iter(), Ok(()), |ctx, ok| {
                     ok?;
-                    Ok((**body).clone().type_of(ctx)?.forall(tele.clone()))
+                    Ok::<_, Error>((**body).clone().type_of(ctx)?.forall(tele.clone()))
                 })?
             }
             Term::Fun(true, tele, body) => {
-                ctx.fold_telescope(|ctx, (_, ty, b), univs| {
+                ctx.fold_telescope(|ctx, (_, ty, b), univs: Result<_, Error>| {
                     let mut univs = univs?;
                     let u = ty.clone().type_of(ctx)?;
                     match b {
@@ -142,7 +149,7 @@ impl Term {
                 }, &mut tele.iter(), Ok(VecDeque::new()), |ctx, univs| {
                     let univs = univs?;
                     let v = (**body).clone().type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
-                    Ok(Term::Type(univs.into_iter().fold(v, |v, u| u.max(v))))
+                    Ok::<_, Error>(Term::Type(univs.into_iter().fold(v, |v, u| u.max(v))))
                 })?
             }
             Term::Type(u) => Term::Type(u.clone().succ()),

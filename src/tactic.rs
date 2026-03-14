@@ -35,7 +35,7 @@ impl Tactic {
         let subgoals = match self {
             Tactic::Exact(t) => {
                 goal.enter(ctx, |ctx, g| {
-                    let t = t.capture_vars(ctx);
+                    let t = t.capture_vars(ctx)?;
                     ctx.instantiate_hole(&g, t.clone())?;
                     if t.has_hole(&ctx) {
                         Err(crate::engine::error::Error::NotGround(t.clone()))
@@ -45,7 +45,7 @@ impl Tactic {
             }
             Tactic::Refine(t) => {
                 Ok(goal.enter(ctx, |ctx, g| {
-                    let t = t.capture_vars(ctx);
+                    let t = t.capture_vars(ctx)?;
                     let mut newgoals = t.collect_goals(ctx)?.into_iter().collect::<VecDeque<_>>();
                     newgoals.make_contiguous().sort();
                     ctx.instantiate_hole(&g, t)?;
@@ -64,7 +64,7 @@ impl Tactic {
                     } else {
                         let t = t.pop().unwrap();
                         Ok(goal.enter(ctx, |ctx, g| {
-                            let mut t = t.capture_vars(ctx);
+                            let mut t = t.capture_vars(ctx)?;
                             let tg = g.type_of(ctx)?;
                             let mut newgoals: VecDeque<_>;
                             loop {
@@ -100,11 +100,11 @@ impl Tactic {
             }
             Tactic::Clear(names) => {
                 goal.enter(ctx, |ctx, g| {
-                    if let Term::App(hyps) = crate::parser::Term::App(names.into_iter().map(|v| crate::parser::Term::Const(v)).collect()).capture_vars(ctx) {
+                    if let Term::App(hyps) = crate::parser::Term::App(names.into_iter().map(|v| crate::parser::Term::Const(v)).collect()).capture_vars(ctx)? {
                         let hyps: HashSet<_> = hyps.into_iter().map(|h| {
                             match &*h {
                                 Term::Var(i) => Ok(i.clone()),
-                                Term::Const(c) => Err(crate::engine::error::Error::UnboundConst(c.clone())),
+                                Term::Const(c, _, _) => Err(crate::engine::error::Error::UnboundConst(c.clone())),
                                 _ => unreachable!()
                             }
                         }).collect::<Result<_, _>>()?;

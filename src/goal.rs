@@ -63,10 +63,10 @@ impl Goal {
         let tg = self.target(ctx).type_of(ctx)?.whd(ctx, WhdFlags::empty().beta())?;
         let mut vars = VecDeque::new();
         std::mem::swap(&mut vars, &mut ctx.var);
-        let r = ctx.fold_telescope(|ctx, (v, ty, b), s| {
+        let r = ctx.fold_telescope(|ctx, (v, ty, b), s: Result<_, Error>| {
             let s = s?;
             let st = ty.pp(ctx)?;
-            Ok(s + &v + " : " + &st + &b.as_ref().map_or(Ok("".to_string()), |b| Ok(" := ".to_string() + &b.pp(ctx)?))? + "\n")
+            Ok(s + &v + " : " + &st + &b.as_ref().map_or(Ok::<_, Error>("".to_string()), |b| Ok(" := ".to_string() + &b.pp(ctx)?))? + "\n")
         }, &mut vars.iter(), Ok("".to_string()), |ctx, s| {
             let s = s?;
             Ok(s + "\n==========================\n\n" + &tg.pp(ctx)? + "\n")

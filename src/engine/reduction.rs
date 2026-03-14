@@ -51,11 +51,11 @@ impl Term {
                         }
                     }
                 }
-                Term::Const(ref c) if flags.delta => {
-                    match ctx.get_const_body(c)?.map(|hd| hd.clone()) {
+                Term::Const(ref c, ref s, ref u) if flags.delta => {
+                    match ctx.get_const_body(c)?.map(|hd| hd.clone().subst_univ(&s, &u)) {
                         None => (false, hd, args),
                         Some(hd) => {
-                            let (hd, args) = hd.apps(args).behead();
+                            let (hd, args) = hd?.apps(args).behead();
                             let (_, hd, args) = if flags.once { (true, hd, args) } else { aux(hd, args, ctx, flags)? };
                             (true, hd, args)
                         }
@@ -107,7 +107,7 @@ impl Term {
     }
 
     /* [!t.may_reduce(ctx)] implies [t.whd(ctx, WhdFlags.default()) == t] */
-    pub fn may_reduce(&self, ctx: &mut Context) -> Result<bool, Error> {
+    pub fn may_reduce(&self, ctx: &Context) -> Result<bool, Error> {
         Ok(match self.head() {
             Term::Type(_) => false,
             Term::Fun(_, _, _) => self.stack_len() != 0 || self.is_let(),
@@ -118,7 +118,7 @@ impl Term {
                     Ok(b) => b.is_some()
                 }
             }
-            Term::Const(c) => ctx.get_const_body(c)?.is_some(),
+            Term::Const(c, _, _) => ctx.get_const_body(c)?.is_some(),
             Term::Hole(h) => ctx.get_hole_body(h)?.is_some(),
             Term::App(_) => unreachable!()
         })

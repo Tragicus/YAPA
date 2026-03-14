@@ -1,10 +1,11 @@
 use crate::utils::*;
-use super::univ::Univ;
+use super::univ::{Univ, Sort, Level};
 use super::context::*;
 use super::error::*;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashSet;
+use std::collections::BTreeMap;
 
 /* Abstractions for local and global variable names:
  * - local variables are represented using De Bruijn indices
@@ -22,7 +23,8 @@ pub type Telescope = VecDeque<Binder>;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Var(VarType),
-    Const(Name),
+    // A constant applied to sort and universe level arguments.
+    Const(Name, Vec<Sort>, Vec<Level>),
     App(VecDeque<Rc<Term>>),
     /* The Fun constructor packages the \lambda, \Pi and let constructs. Lets
      * are represented using defined binders. The boolean is true whenever the
@@ -34,7 +36,7 @@ pub enum Term {
 impl Term {
     fn is_atomic(&self) -> bool {
         match self {
-            Term::Var(_) | Term::Const(_) | Term::Type(_) => true,
+            Term::Var(_) | Term::Const(_, _, _) | Term::Type(_) => true,
             _ => false
         }
     }
@@ -61,7 +63,28 @@ impl std::fmt::Display for Term {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Term::Var(i) => write!(f, "x_{}", i),
-            Term::Const(s) => write!(f, "{}", s),
+            Term::Const(v, s, u) => {
+                write!(f, "{}", v)?;
+                if s.len() + u.len() == 0 { Ok(()) } else {
+                    write!(f, "@{{")?;
+                    if s.len() != 0 {
+                        let mut s = s.iter();
+                        write!(f, "{}", s.next().unwrap())?;
+                        for s in s {
+                            write!(f, ", {}", s)?
+                        };
+                    };
+                    write!(f, "|")?;
+                    if u.len() != 0 {
+                        let mut u = u.iter();
+                        write!(f, "{}", u.next().unwrap())?;
+                        for u in u {
+                            write!(f, ", {}", u)?
+                        };
+                    };
+                    write!(f, "}}")
+                }
+            }
             Term::App(args) => {
                 let mut it = args.iter();
                 it.next().map_or(Ok(()), |t| t.fmt_atom(f))?;
@@ -162,6 +185,23 @@ impl Term {
         self.subst(|i| if i == 0 { t.clone() } else { Term::Var(i - 1) })
     }
 
+    //Substitutes sort and level variable i with the the sort and level from u(i).
+    pub fn subst_univ(self, sorts: &Vec<Sort>, levels: &Vec<Level>) -> Result<Term, Error> {
+        Ok(match self {
+            Term::Var(_) => self,
+            Term::Const(c, s, u) => Term::Const(c, 
+                s.into_iter().map(|s| Ok(match s { Sort::Var(s) => sorts.get(s).ok_or(Error::UnboundSort(s))?.clone(), _ => s })).collect::<Result<_, Error>>()?,
+                u.into_iter().map(|u| Ok(Level { vars: u.vars.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>(if v == 0 { w } else { (Level { vars: w }).max(levels.get(v - 1).ok_or(Error::UnboundUniv(v-1))?.clone().add(n)).vars }))? })
+            ).collect::<Result<_, _>>()?),
+            Term::App(args) => Term::App(args.into_iter().map(|a| Rc::unwrap_or_clone(a).subst_univ(sorts, levels).map(|t| t.into())).collect::<Result<_, _>>()?),
+            Term::Fun(b, tele, body) => Term::Fun(b, tele.into_iter().map(|(v, ty, body)| Ok::<_, Error>((v, ty.subst_univ(sorts, levels)?, body.map(|body| body.subst_univ(sorts, levels)).transpose()?))).collect::<Result<_, _>>()?, Rc::unwrap_or_clone(body).subst_univ(sorts, levels)?.into()),
+            Term::Type(v) => Term::Type(Univ {
+                sort: match v.sort { Sort::Var(s) => sorts.get(s).ok_or(Error::UnboundSort(s))?.clone(), _ => v.sort },
+                level: Level { vars: v.level.vars.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>(if v == 0 { w } else { (Level { vars: w }).max(levels.get(v - 1).ok_or(Error::UnboundUniv(v-1))?.clone().add(n)).vars }))? }
+            }),
+        })
+    }
+
     pub fn free_vars(&self) -> HashSet<VarType> {
         fn aux(t: &Term, k: usize, fv: &mut HashSet<VarType>) -> () {
             match t {
@@ -202,7 +242,28 @@ impl Term {
     pub fn pp<'a>(&self, ctx: &'a mut Context) -> Result<String, Error> {
         Ok(match self {
             Term::Var(i) => ctx.get_var_name(i)?.clone(),
-            Term::Const(s) => s.clone(),
+            Term::Const(v, s, u) => {
+                let mut r = v.clone();
+                if s.len() + u.len() == 0 { r } else {
+                    r = r + "@{";
+                    if s.len() != 0 {
+                        let mut s = s.iter();
+                        r = r + &s.next().unwrap().to_string();
+                        for s in s {
+                            r = r + ", " + &s.to_string();
+                        };
+                    };
+                    r = r + "|";
+                    if u.len() != 0 {
+                        let mut u = u.iter();
+                        r = r + &u.next().unwrap().to_string();
+                        for u in u {
+                            r = r + ", " + &u.to_string();
+                        };
+                    };
+                    r + "}"
+                }
+            }
             Term::App(args) => {
                 let mut it = args.iter();
                 let mut s = it.next().unwrap().pp_atom(ctx)?;
@@ -267,7 +328,7 @@ impl Term {
 
     pub fn dest_const(self) -> Result<Name, Error> {
         match self {
-            Term::Const(c) => Ok(c),
+            Term::Const(c, _, _) => Ok(c),
             _ => Err(Error::NotAConst(self))
         }
     }

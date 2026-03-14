@@ -68,15 +68,15 @@ impl Command {
         match self {
             Command::Print(Term::Const(c)) => {
                 ctx.enter_goal0(|ctx| {
-                    let t = ctx.engine.get_const_body(&c)?.ok_or(crate::engine::error::Error::NoBody(crate::engine::term::Term::Const(c)))?;
+                    let t = ctx.engine.get_const_body(&c)?.ok_or(crate::engine::error::Error::NoBody(crate::engine::term::Term::Const(c, vec![], vec![])))?;
                     println!("{}", t.pp(&mut ctx.engine)?);
                     Ok(())
                 })
             }
-            Command::Print(_) => Err(crate::engine::error::Error::NoBody(crate::engine::term::Term::Const("_".to_string())))?,
+            Command::Print(_) => Err(crate::engine::error::Error::NoBody(crate::engine::term::Term::Const("_".to_string(), vec![], vec![])))?,
             Command::Check(t) => {
                 ctx.enter_goal0(|ctx| {
-                    let t = t.capture_vars(&mut ctx.engine);
+                    let t = t.capture_vars(&mut ctx.engine)?;
                     let ty = t.type_of(&mut ctx.engine)?;
                     println!("{} : {}", t.pp(&mut ctx.engine)?, ty.pp(&mut ctx.engine)?);
                     Ok(())
@@ -85,9 +85,9 @@ impl Command {
             Command::Define(_, _, _) if ctx.status != Status::Idle() => Err(Error::OpenGoals()),
             Command::Define(v, oty, t) => {
                 // N.B. We do not enter goal0 since we need to not be in proof mode.
-                let oty = oty.capture_vars(&mut ctx.engine);
+                let oty = oty.capture_vars(&mut ctx.engine)?;
                 oty.type_of(&mut ctx.engine)?.dest_type(&mut ctx.engine)?;
-                let t = t.capture_vars(&mut ctx.engine);
+                let t = t.capture_vars(&mut ctx.engine)?;
                 let ty = t.type_of(&mut ctx.engine)?;
                 let ty = if let Ok(true) = unify(&mut ctx.engine, &ty, &oty) {
                     oty
@@ -133,7 +133,7 @@ impl Command {
             }
             Command::Whd(t) => {
                 ctx.enter_goal0(|ctx| {
-                    let t = t.capture_vars(&mut ctx.engine).whd(&mut ctx.engine, WhdFlags::default())?;
+                    let t = t.capture_vars(&mut ctx.engine)?.whd(&mut ctx.engine, WhdFlags::default())?;
                     println!("{}", t.pp(&mut ctx.engine)?);
                     Ok(())
                 })

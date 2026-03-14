@@ -51,37 +51,40 @@ impl Term {
         self.forall_or_fun(false, tele)
     }
 
-    pub fn capture_vars(self, ctx: &mut Context) -> crate::engine::term::Term {
-        fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, mut tele: I, body: Term) -> (crate::engine::term::Telescope, crate::engine::term::Term)
+    pub fn capture_vars(self, ctx: &mut Context) -> Result<crate::engine::term::Term, crate::engine::error::Error> {
+        fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, mut tele: I, body: Term) -> Result<(crate::engine::term::Telescope, crate::engine::term::Term), crate::engine::error::Error>
             where I: Iterator<Item = Binder> {
             let x = tele.next();
-            match x {
-                None => (crate::engine::term::Telescope::new(), aux(ctx, vars, i, body)),
+            Ok(match x {
+                None => (crate::engine::term::Telescope::new(), aux(ctx, vars, i, body)?),
                 Some((v, ty, b)) => {
-                    let ty = aux(ctx, vars, i, ty);
-                    let b = b.map(|b| aux(ctx, vars, i, b));
+                    let ty = aux(ctx, vars, i, ty)?;
+                    let b = b.map(|b| aux(ctx, vars, i, b)).transpose()?;
                     vars.insert(v.clone(), i);
-                    let (mut tele, body) = ctx.with_var((v.clone(), ty.clone(), b.clone()), |ctx| fold_map_tele(ctx, vars, i+1, tele, body));
+                    let (mut tele, body) = ctx.with_var((v.clone(), ty.clone(), b.clone()), |ctx| fold_map_tele(ctx, vars, i+1, tele, body))?;
                     vars.remove(&v);
                     tele.push_front((v, ty, b));
                     (tele, body)
                 }
-            }
+            })
         }
 
-        fn aux(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, t: Term) -> crate::engine::term::Term {
-            match t {
+        fn aux(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, t: Term) -> Result<crate::engine::term::Term, crate::engine::error::Error> {
+            Ok(match t {
                 Term::Type(u) => crate::engine::term::Term::Type(u),
                 Term::Const(c) =>
                     if c == "_".to_string() { ctx.new_hole(c, None, true) } else {
-                        vars.get(&c).map_or(crate::engine::term::Term::Const(c.clone()), |v| crate::engine::term::Term::Var(i - v - 1))
+                        match vars.get(&c) {
+                            None => ctx.fresh_const(c)?,
+                            Some(v) => crate::engine::term::Term::Var(i - v - 1)
+                        }
                     },
-                Term::App(args) => crate::engine::term::Term::App(args.into_iter().map(|t| aux(ctx, vars, i, t).into()).collect()),
+                Term::App(args) => crate::engine::term::Term::App(args.into_iter().map(|t| Ok::<_, crate::engine::error::Error>(aux(ctx, vars, i, t)?.into())).collect::<Result<_, _>>()?),
                 Term::Fun(forall, tele, body) => {
-                    let (tele, body) = fold_map_tele(ctx, vars, i, tele.into_iter(), *body);
+                    let (tele, body) = fold_map_tele(ctx, vars, i, tele.into_iter(), *body)?;
                     crate::engine::term::Term::Fun(forall, tele, body.into())
                 }
-            }
+            })
         }
 
         let (_, mut vars) = ctx.var.iter().fold((0, ShadowHashMap::new()), |(i, mut vars), (v, _, _)| {

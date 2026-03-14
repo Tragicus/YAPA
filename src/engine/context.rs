@@ -1,5 +1,6 @@
 use crate::utils::*;
-use crate::kernel::univ::*;
+use crate::kernel::univ;
+use crate::kernel::univ::{Univ, Sort, Level};
 use super::term::*;
 use super::error::*;
 use super::reduction::*;
@@ -8,6 +9,8 @@ use crate::kernel::reduction::WhdFlags;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoleContext {
@@ -30,7 +33,10 @@ pub struct Context {
     pub var: Telescope,
 
     // global variables
-    pub cst: HashMap<Name, (crate::kernel::term::Term, Option<crate::kernel::term::Term>)>,
+    pub cst: HashMap<Name, (univ::Context, crate::kernel::term::Term, Option<crate::kernel::term::Term>)>,
+
+    // universe context
+    pub univ: univ::Context,
 
     // holes and unification constraints
     pub hole: Vec<HoleContext>,
@@ -68,6 +74,7 @@ impl Context {
      Context {
             var: VecDeque::new(),
             cst: HashMap::new(),
+            univ: univ::Context::new(),
             hole: Vec::new(),
             commits: Vec::new(),
             options: HashMap::new(),
@@ -82,7 +89,7 @@ impl Context {
         }
     }
 
-    pub fn find_const(&self, v: &Name) -> Result<&(crate::kernel::term::Term, Option<crate::kernel::term::Term>), Error> {
+    pub fn find_const(&self, v: &Name) -> Result<&(univ::Context, crate::kernel::term::Term, Option<crate::kernel::term::Term>), Error> {
         self.cst.get(v).ok_or(Error::UnboundConst(v.clone()))
     }
 
@@ -106,13 +113,19 @@ impl Context {
     }
 
     pub fn get_const_type(&self, v: &Name) -> Result<Term, Error> {
-        let (t, _) = self.find_const(v)?;
+        let (_, t, _) = self.find_const(v)?;
         Ok(of_kernel(t.clone()))
     }
 
     pub fn get_const_body(&self, v: &Name) -> Result<Option<Term>, Error> {
-        let (_, t) = self.find_const(v)?;
+        let (_, _, t) = self.find_const(v)?;
         Ok(t.as_ref().map(|t| of_kernel(t.clone())))
+    }
+
+    pub fn fresh_const(&mut self, v: Name) -> Result<Term, Error> {
+        let (uctx, _, _) = self.find_const(&v)?;
+        let (s, u) = self.univ.append(uctx.clone());
+        Ok(Term::Const(v, s, u))
     }
 
     pub fn get_hole_name(&self, v: &VarType) -> Result<&Name, Error> {
@@ -142,7 +155,10 @@ impl Context {
 
     pub fn push_const(&mut self, c: Name, t: (Term, Option<Term>)) -> Result<&mut Self, Error> {
         let (ty, t) = t;
-        self.cst.insert(c, (ty.to_kernel(self)?, t.map_or(Ok(None), |t| Ok(Some(t.to_kernel(self)?)))?));
+        let (uctx, s, u) = self.keep_univs(&ty)?;
+        let ty = ty.to_kernel(self)?.subst_univ(&s, &u)?;
+        let t = t.map_or(Ok::<_, Error>(None), |t| Ok(Some(t.to_kernel(self)?.subst_univ(&s, &u)?)))?;
+        self.cst.insert(c, (uctx, ty, t));
         Ok(self)
     }
 
@@ -178,7 +194,7 @@ impl Context {
         let (v, args) = tv.clone().behead();
         let v = v.dest_hole()?;
         let nargs = args.len();
-        let (_, map) = args.iter().fold(Ok((1, HashMap::new())), |m, arg| {
+        let (_, map) = args.iter().fold(Ok::<_, Error>((1, HashMap::new())), |m, arg| {
             let (i, mut map) = m?;
             let v = Rc::unwrap_or_clone(arg.clone()).whd(self, WhdFlags::default())?.dest_var().map_err(|_| Error::HO(tv.clone()))?;
             map.insert(v, if map.contains_key(&v) { None } else { Some(Term::Var(nargs - i)) });
@@ -282,6 +298,57 @@ impl Context {
     pub fn reset_holes(&mut self) -> &Self {
         self.hole = Vec::new();
         self
+    }
+
+    pub fn new_univ(&mut self) -> Univ {
+        self.univ.new_univ()
+    }
+
+    pub fn add_sort_constraint(&mut self, s1: Sort, s2: Sort) -> Result<&mut Self, Error> {
+        self.univ.add_sort_constraint(s1, s2)?;
+        Ok(self)
+    }
+
+    pub fn add_level_constraint(&mut self, u1: Level, u2: Level) -> Result<&mut Self, Error> {
+        self.univ.add_level_constraint(u1, u2)?;
+        Ok(self)
+    }
+
+    pub fn add_constraint(&mut self, u1: Univ, u2: Univ) -> Result<&mut Self, Error> {
+        self.univ.add_constraint(u1, u2)?;
+        Ok(self)
+    }
+
+    // Prunes the sort and level variables that do not appear in t, producing a new universe
+    // context.
+    pub fn keep_univs(&mut self, t: &Term) -> Result<(univ::Context, Vec<Sort>, Vec<Level>), Error> {
+        let (fs, fu) = t.free_univs(self);
+
+        // We instanciate every sort variable outside of fs by its upper bound and rename the
+        // others so that they form an initial segment of NN.
+        let mut k = 0;
+        let substs = (0..self.univ.sorts.len()).map(|s| Ok(if fs.contains(&s) { k = k+1; Sort::Var(k-1) } else { self.univ.sorts.get(s).ok_or(Error::UnboundSort(s.clone()))?.1.clone() })).collect::<Result<_, Error>>()?;
+
+        let mut univ = self.univ.clone();
+
+        let mut k = 0;
+        let mut substu: Vec<_> = (0..self.univ.model.len()).map(|u| if fu.contains(&u) { 
+            k = k+1;
+            Level { vars: BTreeMap::from([(k, 0)]) }
+        } else {
+            univ.minimize_level(u.clone())
+        }).collect();
+
+        substu = substu.clone().into_iter().enumerate().map(|(i, u)| Ok::<_, Error>(if fu.contains(&i) { u } else {
+            Level { vars: u.vars.into_iter().map(|(u, i)| Ok::<_, Error>((substu.get(u).ok_or(Error::UnboundUniv(u.clone()))?.vars.keys().next().unwrap().clone(), i))).collect::<Result<_, _>>()? }
+        })).collect::<Result<_, _>>()?;
+
+        univ.sorts = univ.sorts.into_iter().enumerate().filter(|(i, _)| fs.contains(&i)).map(|(_, s)| s).collect();
+        univ.levels = univ.levels.into_iter().enumerate().filter(|(i, _)| fu.contains(&i)).map(|(_, u)| u).collect();
+        univ.model = univ.model.into_iter().enumerate().filter(|(i, _)| fu.contains(&i)).map(|(_, u)| u).collect();
+
+        univ.minimize_model();
+        Ok((univ, substs, substu))
     }
 }
 

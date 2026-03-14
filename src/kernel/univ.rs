@@ -26,14 +26,14 @@ pub enum Sort {
  * We allow shifting down to make the theory well-behaved. */
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Level {
-    vars: BTreeMap<VarType, isize>
+    pub vars: BTreeMap<VarType, isize>
 }
 
 /* A universe is given by a sort and a level. */
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Univ {
-    sort: Sort,
-    level: Level
+    pub sort: Sort,
+    pub level: Level
 }
 
 impl Level {
@@ -186,7 +186,7 @@ impl std::fmt::Display for Univ {
 
 /* Universes context, containing
  * - a context of sorts as a function which associates to each sort variable its lower and upper
- *   bounds and the set of sort variables that are larger than it, according to the order
+ *   bounds and the set of sort variables that are smaller/larger than it, according to the order
  *   SProp < Prop < Type,
  * - a context of levels as a function which associates to each level variable v the set of its
  *   upper bounds.
@@ -194,9 +194,9 @@ impl std::fmt::Display for Univ {
  * - a model for the previous set of constraints. */
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context {
-    sorts: BTreeMap<VarType, (Sort, Sort, HashSet<VarType>)>,
-    levels: BTreeMap<VarType, Vec<Level>>,
-    model: BTreeMap<VarType, usize>,
+    pub sorts: Vec<(Sort, Sort, HashSet<VarType>, HashSet<VarType>)>,
+    pub levels: Vec<Vec<Level>>,
+    pub model: Vec<usize>,
 }
 
 impl Context {
@@ -204,24 +204,23 @@ impl Context {
      * We initialize the 0 level variable, which is always defined. */
     pub fn new() -> Context {
         Context {
-            sorts: BTreeMap::new(),
-            levels: BTreeMap::from([(0, Vec::new())]),
-            model: BTreeMap::from([(0, 0)])
+            sorts: vec![],
+            levels: vec![vec![]],
+            model: vec![0]
         }
     }
 
     pub fn new_sort(&mut self) -> VarType {
-        let s = self.sorts.last_key_value().map_or(0, |(s, _)| s + 1);
-        self.sorts.insert(s.clone(), (Sort::SProp(), Sort::Type(), HashSet::new()));
+        let s = self.sorts.len();
+        self.sorts.push((Sort::SProp(), Sort::Type(), HashSet::new(), HashSet::new()));
         s
     }
 
     pub fn new_level(&mut self) -> VarType {
-        let u = self.sorts.last_key_value().map_or(0, |(u, _)| u + 1);
-        self.levels.insert(u.clone(), vec![]);
-        self.model.insert(u.clone(), 0);
-        let ubs = self.levels.get_mut(&0).unwrap();
-        ubs.push(Level { vars: BTreeMap::from([(u.clone(), 0)]) });
+        let u = self.model.len();
+        self.levels.push(vec![]);
+        self.model.push(0);
+        self.levels.get_mut(0).unwrap().push(Level { vars: BTreeMap::from([(u.clone(), 0)]) });
         u
     }
 
@@ -233,33 +232,61 @@ impl Context {
 
     /* Adding a constraint [s1 <= s2] to the context of sorts. */
     pub fn add_sort_constraint(&mut self, s1: Sort, s2: Sort) -> Result<&mut Self, Error> {
-        match s1 {
-            Sort::Var(s1) => {
-                let (_, u, v) = self.sorts.get_mut(&s1).ok_or(Error::UnboundSort(s1))?;
-                match s2 {
-                    Sort::Var(s2) => { v.insert(s2); },
-                    s2 => *u = s2.max(u.clone()),
-                }
+        // Propagates the constaint l <= s in the graph of sort variables constraints
+        fn propagate_up(univ: &mut Context, s: &VarType, l: &Sort) -> Result<(), Error> {
+            let (ls, _, _, ub) = univ.sorts.get_mut(*s).ok_or(Error::UnboundSort(s.clone()))?;
+            if *ls < *l {
+                *ls = l.clone();
+                ub.clone().iter().map(|s| propagate_up(univ, s, l)).collect::<Result<(), Error>>()?;
             }
-            s1 => match s2 {
-                Sort::Var(s2) => {
-                    let (l, _, _) = self.sorts.get_mut(&s2).ok_or(Error::UnboundSort(s2))?;
-                    *l = s1.max(l.clone())
-                }
-                s2 => { if s2 < s1 { Err(Error::SortInconsistency(s2, s1))? }; }
+            Ok(())
+        }
+
+        // Propagates the constaint s <= u in the graph of sort variables constraints
+        fn propagate_down(univ: &mut Context, s: &VarType, u: &Sort) -> Result<(), Error> {
+            let (_, us, lb, _) = univ.sorts.get_mut(*s).ok_or(Error::UnboundSort(s.clone()))?;
+            if *u < *us {
+                *us = u.clone();
+                lb.clone().iter().map(|s| propagate_down(univ, s, u)).collect::<Result<(), Error>>()?;
             }
+            Ok(())
+        }
+
+        match (s1, s2) {
+            (Sort::Var(s1), Sort::Var(s2)) => {
+                let (l1, _, _, _) = self.sorts.get(s1).ok_or(Error::UnboundSort(s1))?;
+                let (_, u2, _, _) = self.sorts.get(s2).ok_or(Error::UnboundSort(s2))?;
+                if u2 < l1 { Err(Error::SortInconsistency(u2.clone(), l1.clone()))? };
+
+                let (l1, _, _, ub1) = self.sorts.get_mut(s2).unwrap();
+                ub1.insert(s2);
+                let l1 = l1.clone();
+                propagate_up(self, &s2, &l1)?;
+
+                let (_, u2, lb2, _) = self.sorts.get_mut(s1).unwrap();
+                lb2.insert(s1);
+                let u2 = u2.clone();
+                propagate_down(self, &s1, &u2)?;
+            }
+            (Sort::Var(s1), s2) => {
+                let (l, u, _, _) = self.sorts.get_mut(s1).ok_or(Error::UnboundSort(s1))?;
+                if s2 < *l { Err(Error::SortInconsistency(s2, l.clone()))? };
+                let u = u.clone();
+                propagate_down(self, &s1, &u)?;
+            }
+            (s1, Sort::Var(s2)) => {
+                let (l, u, _, _) = self.sorts.get_mut(s2).ok_or(Error::UnboundSort(s2))?;
+                if *u < s1 { Err(Error::SortInconsistency(u.clone(), s1))? };
+                let l = l.clone();
+                propagate_up(self, &s2, &l)?;
+            }
+            (s1, s2) => { if s2 < s1 { Err(Error::SortInconsistency(s2, s1))? }; }
         }
         Ok(self)
     }
 
-    /* Adding a constraint [u1 <= u2] to the context of universes. */
-    pub fn add_constraint(&mut self, u1: Univ, u2: Univ) -> Result<&mut Self, Error> {
-        // Let's destruct u1 and u2.
-        let Univ { sort: s1, level: u1 } = u1;
-        let Univ { sort: s2, level: u2 } = u2;
-        // We assert that s1 = s2.
-        self.add_sort_constraint(s1.clone(), s2.clone())?;
-        self.add_sort_constraint(s2.clone(), s1.clone())?;
+    /* Adding a constraint [u1 <= u2] to the context of universe levels. */
+    pub fn add_level_constraint(&mut self, u1: Level, u2: Level) -> Result<&mut Self, Error> {
         /* For every level variable u in the domain of u1, we add the constraint u + u1(u) <= u2.
          * We only add a constraint if it is not obviously redundant, and we remove constraints
          * that become obviously redundant.
@@ -267,7 +294,7 @@ impl Context {
         let mut updt = HashSet::new();
         u1.clone().vars.into_iter().map(|(u, n)| {
             let u2 = u2.clone().add(-n);
-            let ubs = self.levels.get_mut(&u).ok_or(Error::UnboundUniv(u))?;
+            let ubs = self.levels.get_mut(u).ok_or(Error::UnboundUniv(u))?;
             let mut ditch = false;
             *ubs = ubs.iter().filter(|v| {
                 if ditch { true } else {
@@ -289,7 +316,18 @@ impl Context {
             };
             Ok(())
         }).collect::<Result<(), _>>()?;
-        self.saturate_model(/*updt*/).map_err(|_| Error::UnivInconsistency(Univ { sort: s1, level: u1 }, Univ { sort: s2, level: u2 }))
+        self.saturate_model(/*updt*/).map_err(|_| Error::UnivInconsistency(Univ { sort: Sort::Type(), level: u1 }, Univ { sort: Sort::Type(), level: u2 }))
+    }
+
+    /* Adding a constraint [u1 <= u2] to the context of universes. */
+    pub fn add_constraint(&mut self, u1: Univ, u2: Univ) -> Result<&mut Self, Error> {
+        // Let's destruct u1 and u2.
+        let Univ { sort: s1, level: u1 } = u1;
+        let Univ { sort: s2, level: u2 } = u2;
+        // We assert that s1 = s2.
+        self.add_sort_constraint(s1.clone(), s2.clone())?;
+        self.add_sort_constraint(s2.clone(), s1.clone())?;
+        self.add_level_constraint(u1, u2)
     }
 
     /* Auxiliary function for saturate_model, where we only consider constraints that have their
@@ -300,12 +338,13 @@ impl Context {
 
             let mut done = true;
 
-            for (u, ubs) in self.levels.iter().filter(|(u, _)| dom.contains(&u)) {
+            for u in dom.iter() {
+                let ubs = self.levels.get(*u).unwrap();
                 for v in ubs.iter() {
                     let k = v.vars.iter().map(|(v, m)| {
-                        (*self.model.get(&v).unwrap() as isize) - m
+                        (*self.model.get(*v).unwrap() as isize) - m
                     }).min().unwrap();
-                    if k <= 0 || *self.model.get(&u).unwrap() < (k as usize) {
+                    if k <= 0 || *self.model.get(*u).unwrap() < (k as usize) {
                         self.model.insert(u.clone(), k as usize);
                         done = false;
                     };
@@ -322,16 +361,18 @@ impl Context {
     /* Auxiliary function for saturate_model, where we only consider constraints that are over the
      * elements of the given domain. */
     fn saturate_over(&mut self, dom: &HashSet<VarType>) -> Result<&mut Self, HashSet<VarType>> {
+        if dom.len() == 0 { return Ok(self) };
         let mut updt = HashSet::new();
         let mut n = 0;
 
         loop {
-            for (u, ubs) in self.levels.iter().filter(|(u, _)| dom.contains(&u)) {
+            for u in dom.iter() {
+                let ubs = self.levels.get(*u).unwrap();
                 for v in ubs.iter() {
                     let k = v.vars.iter().map(|(v, m)| {
-                        (*self.model.get(&v).unwrap() as isize) - m
+                        (*self.model.get(*v).unwrap() as isize) - m
                     }).min().unwrap();
-                    if k <= 0 || *self.model.get(&u).unwrap() < k as usize {
+                    if k <= 0 || *self.model.get(*u).unwrap() < k as usize {
                         self.model.insert(u.clone(), k as usize);
                         updt.insert(u.clone());
                     };
@@ -352,8 +393,7 @@ impl Context {
      * model of self's constraints. */
     // TODO: Check if only considering the updated constraints in the first pass is useful.
     fn saturate_model(&mut self/*, updt: HashSet<VarType>*/) -> Result<&mut Self, HashSet<VarType>> {
-        let dom = self.model.iter().map(|(u, _)| u.clone()).collect();
-        self.saturate_over(&dom)
+        self.saturate_over(&(0..self.model.len()).into_iter().collect())
     }
 
     /* Removes a level variable from the context, returning a minimal level that may be equal to
@@ -361,19 +401,19 @@ impl Context {
     pub fn minimize_level(&mut self, u: VarType) -> Level {
         let mut lb = Level { vars: BTreeMap::new() };
 
-        for v in self.model.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>() {
+        for v in 0..self.model.len() {
             if v == u { continue; }
-            for i in 0..(self.levels.get(&v).unwrap().len()) {
-                let w = self.levels.get_mut(&v).unwrap().get_mut(i).unwrap();
+            for i in 0..(self.levels.get(v).unwrap().len()) {
+                let w = self.levels.get_mut(v).unwrap().get_mut(i).unwrap();
                 if !w.vars.contains_key(&u) { continue; }
                 let n = w.vars.remove(&u).unwrap();
                 let w = w.clone();
-                self.levels.get_mut(&u).unwrap().push(w);
+                self.levels.get_mut(u).unwrap().push(w);
                 let model = self.model.clone();
                 if !self.saturate_model().is_ok() {
                     self.model = model.clone();
-                    self.levels.get_mut(&u).unwrap().pop();
-                    let w = self.levels.get_mut(&v).unwrap().get_mut(i).unwrap();
+                    self.levels.get_mut(u).unwrap().pop();
+                    let w = self.levels.get_mut(v).unwrap().get_mut(i).unwrap();
                     let mut w0 = Level { vars: BTreeMap::from([(v.clone(), n)]) };
                     std::mem::swap(w, &mut w0);
                     lb = lb.max(w0.succ());
@@ -382,5 +422,28 @@ impl Context {
         }
 
         lb
+    }
+
+    pub fn minimize_model(&mut self) -> &mut Self {
+        for v in self.model.iter_mut() { *v = 0 }
+
+        self.saturate_model().unwrap()
+    }
+
+    pub fn append(&mut self, ctx: Context) -> (Vec<Sort>, Vec<Level>) {
+        let Context { sorts, levels, mut model } = ctx;
+
+        let ns = self.sorts.len();
+        let nu = self.model.len();
+        
+        let mut sorts: Vec<_> = sorts.into_iter().map(|(lb, ub, lbs, ubs)| (lb, ub, lbs.into_iter().map(|s| s + ns).collect(), ubs.into_iter().map(|s| s + ns).collect())).collect();
+        self.sorts.append(&mut sorts);
+
+        self.levels.append(&mut levels.into_iter().map(|ubs| ubs.into_iter().map(|u| Level { vars: u.vars.into_iter().map(|(u, i)| (u + nu, i)).collect() } ).collect()).collect());
+
+        self.model.append(&mut model);
+
+        ((0..sorts.len()).map(|s| Sort::Var(s + ns)).collect(),
+            (0..model.len()).map(|u| Level { vars: BTreeMap::from([(u + nu, 0)]) }).collect())
     }
 }

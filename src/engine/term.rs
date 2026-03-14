@@ -1,5 +1,5 @@
 use crate::utils::*;
-use crate::kernel::univ::Univ;
+use crate::kernel::univ::{Univ, Sort, Level};
 use super::context::*;
 use super::error::*;
 use super::typing::*;
@@ -7,6 +7,7 @@ use crate::kernel::reduction::WhdFlags;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::iter::Map;
 
 /* Abstractions for local and global variable names:
@@ -25,7 +26,8 @@ pub type Telescope = VecDeque<Binder>;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Var(VarType),
-    Const(Name),
+    // A constant applied to sort and universe level arguments.
+    Const(Name, Vec<Sort>, Vec<Level>),
     App(VecDeque<Rc<Term>>),
     /* The Fun constructor packages the \lambda, \Pi and let constructs. Lets
      * are represented using defined binders. The boolean is true whenever the
@@ -38,7 +40,7 @@ pub enum Term {
 impl Term {
     pub fn is_atomic(&self) -> bool {
         match self {
-            Term::Var(_) | Term::Const(_) | Term::Type(_) | Term::Hole(_) => true,
+            Term::Var(_) | Term::Const(_, _, _) | Term::Type(_) | Term::Hole(_) => true,
             _ => false
         }
     }
@@ -71,7 +73,28 @@ impl std::fmt::Display for Term {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Term::Var(i) => write!(f, "x_{}", i),
-            Term::Const(s) => write!(f, "{}", s),
+            Term::Const(v, s, u) => {
+                write!(f, "{}", v)?;
+                if s.len() + u.len() == 0 { Ok(()) } else {
+                    write!(f, "@{{")?;
+                    if s.len() != 0 {
+                        let mut s = s.iter();
+                        write!(f, "{}", s.next().unwrap())?;
+                        for s in s {
+                            write!(f, ", {}", s)?
+                        };
+                    };
+                    write!(f, "|")?;
+                    if u.len() != 0 {
+                        let mut u = u.iter();
+                        write!(f, "{}", u.next().unwrap())?;
+                        for u in u {
+                            write!(f, ", {}", u)?
+                        };
+                    };
+                    write!(f, "}}")
+                }
+            }
             Term::App(args) => {
                 let mut it = args.iter();
                 it.next().map_or(Ok(()), |t| t.fmt_atom(f))?;
@@ -173,6 +196,25 @@ impl Term {
         self.subst(|i| if i == 0 { t.clone() } else { Term::Var(i - 1) })
     }
 
+    //Substitutes sort and level variable i with the the sort and level from sorts(i) and levels(i)
+    //respectively.
+    pub fn subst_univ(self, sorts: &Vec<Sort>, levels: &Vec<Level>) -> Result<Term, Error> {
+        Ok(match self {
+            Term::Var(_) | Term::Hole(_) => self,
+            Term::Const(c, s, u) => Term::Const(c, 
+                s.into_iter().map(|s| Ok(match s { Sort::Var(s) => sorts.get(s).ok_or(Error::UnboundSort(s))?.clone(), _ => s })).collect::<Result<_, Error>>()?,
+                u.into_iter().map(|u| Ok::<_, Error>(Level { vars: u.vars.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>(if v == 0 { w } else { (Level { vars: w }).max(levels.get(v - 1).ok_or(Error::UnboundUniv(v-1))?.clone().add(n)).vars }))? })
+            ).collect::<Result<_, _>>()?),
+            Term::App(args) => Term::App(args.into_iter().map(|a| Rc::unwrap_or_clone(a).subst_univ(sorts, levels).map(|t| t.into())).collect::<Result<_, _>>()?),
+            Term::Fun(b, tele, body) => Term::Fun(b, tele.into_iter().map(|(v, ty, body)| Ok::<_, Error>((v, ty.subst_univ(sorts, levels)?, body.map(|body| body.subst_univ(sorts, levels)).transpose()?))).collect::<Result<_, _>>()?, Rc::unwrap_or_clone(body).subst_univ(sorts, levels)?.into()),
+            Term::Type(v) => Term::Type(Univ {
+                sort: match v.sort { Sort::Var(s) => sorts.get(s).ok_or(Error::UnboundSort(s))?.clone(), _ => v.sort },
+                level: Level { vars: v.level.vars.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>(if v == 0 { w } else { (Level { vars: w }).max(levels.get(v - 1).ok_or(Error::UnboundUniv(v-1))?.clone().add(n)).vars }))? }
+            }),
+        })
+    }
+
+
     pub fn fold<'a, T, F : Fn(&mut Context, &Term, T) -> T>(&self, ctx: &mut Context, f: F, init: T) -> Result<T, Error> {
         let init = f(ctx, self, init);
         Ok(match self {
@@ -181,7 +223,7 @@ impl Term {
                 let t = match t { Some(t) => t.clone(), None => Term::Var(*v) };
                 f(ctx, &t, init)
             }
-            Term::Const(_) | Term::Type(_) => init,
+            Term::Const(_, _, _) | Term::Type(_) => init,
             Term::App(args) => args.iter().fold(init, |t, arg| f(ctx, &*arg, t)),
             Term::Fun(_, tele, body) =>
                 ctx.fold_telescope(|ctx, (_, ty, t), x| { let x = f(ctx, ty, x); match t { None => x, Some(t) => f(ctx, t, x) } }, &mut tele.iter(), init, |ctx, x| f(ctx, &*body, x)),
@@ -223,6 +265,54 @@ impl Term {
         fv
     }
 
+    pub fn free_univs(&self, ctx: &mut Context) -> (HashSet<VarType>, HashSet<VarType>) {
+        fn aux(t: &Term, ctx: &mut Context, fs: &mut HashSet<VarType>, fu: &mut HashSet<VarType>) -> () {
+            match t {
+                Term::Type(Univ { sort, level }) => {
+                    match sort {
+                        Sort::Var(s) => { fs.insert(s.clone()); }
+                        _ => ()
+                    };
+                    for u in level.vars.keys() { fu.insert(u.clone()); };
+                }
+                Term::Const(_, s, u) => {
+                    for s in s {
+                        match s {
+                            Sort::Var(s) => { fs.insert(s.clone()); }
+                            _ => ()
+                        };
+                    };
+                    for u in u {
+                        for u in u.vars.keys() { fu.insert(u.clone()); };
+                    }
+                }
+                Term::App(args) => {
+                    match t.head() {
+                        Term::Hole(_) if t.may_reduce(ctx).unwrap() => {
+                            let t = t.clone().whd(ctx, WhdFlags::empty()).unwrap();
+                            aux(&t, ctx, fs, fu)
+                        }
+                        _ => { for t in args { aux(t, ctx, fs, fu); } }
+                    } 
+                }
+                Term::Fun(_, tele, body) => {
+                    tele.iter().fold((), |_, (_, ty, b)| {
+                        aux(ty, ctx, fs, fu);
+                        b.as_ref().map(|b| aux(&b, ctx, fs, fu));
+                    });
+                    aux(&*body, ctx, fs, fu);
+                }
+                Term::Hole(v) => { ctx.get_hole_body(v).unwrap().clone().map(|t| aux(&t, ctx, fs, fu)); },
+                _ => ()
+            }
+        }
+        let mut fs = HashSet::new();
+        let mut fu = HashSet::new();
+        aux(self, ctx, &mut fs, &mut fu);
+        (fs, fu)
+    }
+
+
     pub fn occurs(&self, ctx: &mut Context, t : &Term) -> bool {
         self == t ||
         match self {
@@ -258,7 +348,7 @@ impl Term {
                         _ => Ok(Term::App(self.dest_app()?.into_iter().map(|x| Rc::unwrap_or_clone(x).eliminate_patterns(ctx, pats)).collect::<Result<Vec<_>, _>>()?.into_iter().map(|x| x.into()).collect()))
                     },
                 Term::Fun(forall, tele, body) => {
-                    ctx.fold_telescope(|ctx, (v, t, b), tele| {
+                    ctx.fold_telescope(|ctx, (v, t, b), tele: Result<_, Error>| {
                         let mut tele = tele?;
                         let t = t.clone().eliminate_patterns(ctx, pats)?;
                         let b = b.clone().map(|b| b.eliminate_patterns(ctx, pats)).transpose()?;
@@ -299,7 +389,28 @@ impl Term {
     pub fn pp<'a>(&self, ctx: &'a mut Context) -> Result<String, Error> {
         Ok(match self.clone().whd(ctx, WhdFlags::empty())? {
             Term::Var(i) => ctx.get_var_name(&i)?.clone(),
-            Term::Const(s) => s,
+            Term::Const(v, s, u) => {
+                let mut r = v.clone();
+                if s.len() + u.len() == 0 { r } else {
+                    r = r + "@{";
+                    if s.len() != 0 {
+                        let mut s = s.iter();
+                        r = r + &s.next().unwrap().to_string();
+                        for s in s {
+                            r = r + ", " + &s.to_string();
+                        };
+                    };
+                    r = r + "|";
+                    if u.len() != 0 {
+                        let mut u = u.iter();
+                        r = r + &u.next().unwrap().to_string();
+                        for u in u {
+                            r = r + ", " + &u.to_string();
+                        };
+                    };
+                    r + "}"
+                }
+            }
             Term::App(args) => {
                 let mut it = args.into_iter();
                 let mut s = it.next().unwrap().pp_atom(ctx)?;
@@ -307,10 +418,10 @@ impl Term {
                 s
             }
             Term::Fun(forall, tele, body) => 
-                ctx.fold_telescope(|ctx, (v, ty, b), s| {
-                    Ok(s? + &(" (".to_string() + v + " : " + &ty.pp(ctx)? + &b.as_ref().map_or(Ok("".to_string()), |b| Ok(" := ".to_owned() + &b.pp(ctx)?))? + ")"))
+                ctx.fold_telescope(|ctx, (v, ty, b), s: Result<_, Error>| {
+                    Ok(s? + &(" (".to_string() + v + " : " + &ty.pp(ctx)? + &b.as_ref().map_or(Ok::<_, Error>("".to_string()), |b| Ok(" := ".to_owned() + &b.pp(ctx)?))? + ")"))
                 }, &mut tele.iter(), Ok((if forall { "forall" } else { "fun" }).to_string()), |ctx, s| {
-                    Ok(s? + (if forall { ", " } else { " => " }) + &body.pp(ctx)?)
+                    Ok::<_, Error>(s? + (if forall { ", " } else { " => " }) + &body.pp(ctx)?)
                 })?,
             Term::Type(u) => "Type@(".to_string() + &u.to_string() + ")",
             Term::Hole(i) => "?".to_string() + &ctx.get_hole_name(&i)?.clone()
@@ -365,7 +476,7 @@ impl Term {
 
     pub fn dest_const(self) -> Result<Name, Error> {
         match self {
-            Term::Const(c) => Ok(c),
+            Term::Const(c, _, _) => Ok(c),
             _ => Err(Error::NotAConst(self))
         }
     }
@@ -426,7 +537,7 @@ impl Term {
 
     pub fn has_hole(&self, ctx: &Context) -> bool {
         match self {
-            Term::Var(_) | Term::Const(_) | Term::Type(_) => false,
+            Term::Var(_) | Term::Const(_, _, _) | Term::Type(_) => false,
             Term::Hole(h) => ctx.get_hole_body(h).map_or(true, |t| t.as_ref().map_or(true, |t| t.has_hole(ctx))),
             Term::App(args) => !args.iter().all(|t| !t.has_hole(ctx)),
             Term::Fun(_, tele, body) => !tele.iter().all(|(_, t, b)| !(t.has_hole(ctx) || b.as_ref().map_or(false, |t| t.has_hole(ctx)))) || body.has_hole(ctx),
@@ -436,7 +547,7 @@ impl Term {
     pub fn to_kernel(self, ctx: &Context) -> Result<crate::kernel::term::Term, Error> {
         Ok(match self {
             Term::Var(v) => crate::kernel::term::Term::Var(v),
-            Term::Const(c) => crate::kernel::term::Term::Const(c),
+            Term::Const(c, s, u) => crate::kernel::term::Term::Const(c, s, u),
             Term::Type(u) => crate::kernel::term::Term::Type(u),
             Term::App(args) => crate::kernel::term::Term::App(
                 args.into_iter()
@@ -456,10 +567,16 @@ impl Term {
 pub fn of_kernel(t: crate::kernel::term::Term) -> Term {
     match t {
         crate::kernel::term::Term::Var(v) => Term::Var(v),
-        crate::kernel::term::Term::Const(c) => Term::Const(c),
+        crate::kernel::term::Term::Const(c, s, u) => Term::Const(c, s, u),
         crate::kernel::term::Term::Type(u) => Term::Type(u),
         crate::kernel::term::Term::App(args) => Term::App(args.into_iter().map(|t| of_kernel(Rc::unwrap_or_clone(t)).into()).collect()),
         crate::kernel::term::Term::Fun(forall, tele, body) => Term::Fun(forall, tele.into_iter().map(|(v, ty, b)| (v, of_kernel(ty), b.map(of_kernel))).collect(), of_kernel(Rc::unwrap_or_clone(body)).into()),
+    }
+}
+
+impl From<crate::kernel::term::Term> for Term {
+    fn from(t: crate::kernel::term::Term) -> Term {
+        of_kernel(t)
     }
 }
 

@@ -1,4 +1,6 @@
 use crate::utils::*;
+use super::univ;
+use super::univ::{Univ, Sort, Level};
 use super::term::*;
 use super::error::*;
 use std::collections::HashMap;
@@ -10,6 +12,9 @@ pub struct Context {
 
     // global variables
     pub cst: HashMap<Name, (Term, Term)>,
+
+    // universe context
+    pub univ: univ::Context,
 
     // Graph with an arc from v to w if v *-reduces to w when applied to enough arguments. Its
     // label tells the minimum number of beta-reductions needed to go from v to w.
@@ -24,9 +29,11 @@ impl Context {
     pub fn new() -> Self {
         Context {
             var: Vec::new(),
+
+            // universe context
             cst: HashMap::new(),
+            univ: univ::Context::new(),
             //reds: Graph::new(),
-            //universes: Graph::new(),
         }
     }
 
@@ -109,6 +116,25 @@ impl Context {
                 self.with_var((v, ty, b), |ctx| ctx.fold_telescope(f, tele, t, g))
             }
         }
+    }
+
+    pub fn new_univ(&mut self) -> Univ {
+        self.univ.new_univ()
+    }
+
+    pub fn add_sort_constraint(&mut self, s1: Sort, s2: Sort) -> Result<&mut Self, Error> {
+        self.univ.add_sort_constraint(s1, s2)?;
+        Ok(self)
+    }
+
+    pub fn add_level_constraint(&mut self, u1: Level, u2: Level) -> Result<&mut Self, Error> {
+        self.univ.add_level_constraint(u1, u2)?;
+        Ok(self)
+    }
+
+    pub fn add_constraint(&mut self, u1: Univ, u2: Univ) -> Result<&mut Self, Error> {
+        self.univ.add_constraint(u1, u2)?;
+        Ok(self)
     }
 }
 

@@ -136,8 +136,8 @@ impl Term {
                         }
                     }
                 }
-                Term::Const(ref c) if flags.delta => {
-                    let hd = ctx.get_const_body(c)?.clone();
+                Term::Const(ref c, s, u) if flags.delta => {
+                    let hd = ctx.get_const_body(c)?.clone().subst_univ(&s, &u)?;
                     let (hd, args) = hd.apps(args).behead();
                     let (_, hd, args) = if flags.once { (true, hd, args) } else { aux(hd, args, ctx, flags)? };
                     (true, hd, args)
@@ -189,7 +189,7 @@ impl Term {
                     Ok(b) => b.is_some()
                 }
             }
-            Term::Const(_) => true,
+            Term::Const(_, _, _) => true,
             Term::App(_) => unreachable!()
         })
     }
