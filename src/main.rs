@@ -23,7 +23,7 @@ fn main() {
         match c.exec(&mut ctx) {
             Ok(_) => (),
             Err(err) => {
-                println!("{}", err.pp(&mut ctx).unwrap());
+                println!("{:?}\n\n in ctx {:?}", err, ctx);
                 return;
             }
         }

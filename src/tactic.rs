@@ -32,6 +32,7 @@ pub fn exec_seq(tacs: &VecDeque<Tactic>, ctx: &mut crate::engine::context::Conte
 
 impl Tactic {
     pub fn exec(self, ctx: &mut crate::engine::context::Context, mut goal: Goal) -> Result<VecDeque<Goal>, Error> {
+        //println!("exec {:?}", self);
         let subgoals = match self {
             Tactic::Exact(t) => {
                 goal.enter(ctx, |ctx, g| {

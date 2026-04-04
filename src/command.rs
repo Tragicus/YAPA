@@ -85,6 +85,7 @@ impl Command {
             Command::Define(_, _, _) if ctx.status != Status::Idle() => Err(Error::OpenGoals()),
             Command::Define(v, oty, t) => {
                 // N.B. We do not enter goal0 since we need to not be in proof mode.
+                assert!(ctx.engine.univ.levels[0].1.len() == 0);
                 let oty = oty.capture_vars(&mut ctx.engine)?;
                 oty.type_of(&mut ctx.engine)?.dest_type(&mut ctx.engine)?;
                 let t = t.capture_vars(&mut ctx.engine)?;
@@ -101,6 +102,7 @@ impl Command {
                 } else {
                     ctx.engine.push_const(v, (ty, Some(t)))?;
                     ctx.engine.reset_holes();
+                    ctx.engine.reset_univs();
                 }
                 Ok(())
             }
@@ -122,6 +124,8 @@ impl Command {
                     let ty0 = t.type_of(&mut ctx.engine)?;
                     if unify(&mut ctx.engine, &ty, &ty0)? {
                         ctx.engine.push_const(v.clone(), (ty.clone(), if transparent { Some(t.clone()) } else { None }))?;
+                        ctx.engine.reset_holes();
+                        ctx.engine.reset_univs();
                     } else {
                         Err(crate::engine::error::Error::TypeMismatch(t.clone(), ty.clone()))?
                     }

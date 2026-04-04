@@ -1,4 +1,3 @@
-use crate::kernel::univ::*;
 use crate::engine::context::*;
 use crate::command::*;
 use crate::engine::context::Context;
@@ -6,7 +5,8 @@ use crate::tactic::*;
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::collections::HashMap;
-use crate::utils::ShadowHashMap;
+use std::collections::BTreeMap;
+use crate::utils::{VarType, ShadowHashMap};
 use std::vec::Vec;
 use pest::Parser;
 use pest_derive::Parser;
@@ -16,6 +16,25 @@ use pest::iterators::Pair;
 #[derive(Parser)]
 #[grammar = "parser.pest"]
 struct YapaParser;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Sort {
+    SProp(),
+    Prop(),
+    Type(),
+    Var(String)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Level {
+    pub vars: BTreeMap<String, usize>
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Univ {
+    sort: Sort,
+    level: Level
+}
 
 pub type Binder = (String, Term, Option<Term>);
 pub type Telescope = VecDeque<Binder>;
@@ -52,16 +71,16 @@ impl Term {
     }
 
     pub fn capture_vars(self, ctx: &mut Context) -> Result<crate::engine::term::Term, crate::engine::error::Error> {
-        fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, mut tele: I, body: Term) -> Result<(crate::engine::term::Telescope, crate::engine::term::Term), crate::engine::error::Error>
+        fn fold_map_tele<'a, I>(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, sorts: &HashMap<String, VarType>, levels: &HashMap<String, VarType>, i: usize, mut tele: I, body: Term) -> Result<(crate::engine::term::Telescope, crate::engine::term::Term), crate::engine::error::Error>
             where I: Iterator<Item = Binder> {
             let x = tele.next();
             Ok(match x {
-                None => (crate::engine::term::Telescope::new(), aux(ctx, vars, i, body)?),
+                None => (crate::engine::term::Telescope::new(), aux(ctx, vars, sorts, levels, i, body)?),
                 Some((v, ty, b)) => {
-                    let ty = aux(ctx, vars, i, ty)?;
-                    let b = b.map(|b| aux(ctx, vars, i, b)).transpose()?;
+                    let ty = aux(ctx, vars, sorts, levels, i, ty)?;
+                    let b = b.map(|b| aux(ctx, vars, sorts, levels, i, b)).transpose()?;
                     vars.insert(v.clone(), i);
-                    let (mut tele, body) = ctx.with_var((v.clone(), ty.clone(), b.clone()), |ctx| fold_map_tele(ctx, vars, i+1, tele, body))?;
+                    let (mut tele, body) = ctx.with_var((v.clone(), ty.clone(), b.clone()), |ctx| fold_map_tele(ctx, vars, sorts, levels, i+1, tele, body))?;
                     vars.remove(&v);
                     tele.push_front((v, ty, b));
                     (tele, body)
@@ -69,9 +88,23 @@ impl Term {
             })
         }
 
-        fn aux(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, i: usize, t: Term) -> Result<crate::engine::term::Term, crate::engine::error::Error> {
+        fn aux(ctx: &mut Context, vars: &mut ShadowHashMap<String, usize>, sorts: &HashMap<String, VarType>, levels: &HashMap<String, VarType>, i: usize, t: Term) -> Result<crate::engine::term::Term, crate::engine::error::Error> {
             Ok(match t {
-                Term::Type(u) => crate::engine::term::Term::Type(u),
+                Term::Type(Univ { sort: s, level: u }) => crate::engine::term::Term::Type(crate::kernel::univ::Univ {
+                    sort: match s {
+                        Sort::SProp() => crate::kernel::univ::Sort::SProp(),
+                        Sort::Prop() => crate::kernel::univ::Sort::Prop(),
+                        Sort::Type() => crate::kernel::univ::Sort::Type(),
+                        Sort::Var(s) => crate::kernel::univ::Sort::Var(if s == "_" { ctx.univ.new_sort(None) } else { *sorts.get(&s).ok_or(crate::engine::error::Error::UnboundConst(s))? }),
+                    },
+                    level: crate::kernel::univ::Level { vars:
+                        if u.vars.len() == 0 {
+                            let u = ctx.univ.new_level(None);
+                            BTreeMap::from([(u, 0)])
+                        } else {
+                            u.vars.into_iter().map(|(v, i)| Ok::<_, crate::engine::error::Error>((levels.get(&v).ok_or(crate::engine::error::Error::UnboundConst(v))?.clone(), i as isize))).collect::<Result<_, _>>()?
+                        }
+                    }}),
                 Term::Const(c) =>
                     if c == "_".to_string() { ctx.new_hole(c, None, true) } else {
                         match vars.get(&c) {
@@ -79,20 +112,30 @@ impl Term {
                             Some(v) => crate::engine::term::Term::Var(i - v - 1)
                         }
                     },
-                Term::App(args) => crate::engine::term::Term::App(args.into_iter().map(|t| Ok::<_, crate::engine::error::Error>(aux(ctx, vars, i, t)?.into())).collect::<Result<_, _>>()?),
+                Term::App(args) => crate::engine::term::Term::App(args.into_iter().map(|t| Ok::<_, crate::engine::error::Error>(aux(ctx, vars, sorts, levels, i, t)?.into())).collect::<Result<_, _>>()?),
                 Term::Fun(forall, tele, body) => {
-                    let (tele, body) = fold_map_tele(ctx, vars, i, tele.into_iter(), *body)?;
+                    let (tele, body) = fold_map_tele(ctx, vars, sorts, levels, i, tele.into_iter(), *body)?;
                     crate::engine::term::Term::Fun(forall, tele, body.into())
                 }
             })
         }
 
-        let (_, mut vars) = ctx.var.iter().fold((0, ShadowHashMap::new()), |(i, mut vars), (v, _, _)| {
+        let mut vars = ctx.var.iter().enumerate().fold(ShadowHashMap::new(), |mut vars, (i, (v, _, _))| {
             vars.insert(v.clone(), i);
-            (i+1, vars)
+            vars
         });
 
-        aux(ctx, &mut vars, ctx.var.len(), self)
+        let sorts = ctx.univ.sorts.iter().fold(HashMap::new(), |mut sorts, (n, _, _, _, _)| {
+            n.as_ref().map(|n| sorts.insert(n.clone(), sorts.len()));
+            sorts
+        });
+
+        let levels = ctx.univ.levels.iter().fold(HashMap::new(), |mut levels, (n, _)| {
+            n.as_ref().map(|n| levels.insert(n.clone(), levels.len()));
+            levels
+        });
+
+        aux(ctx, &mut vars, &sorts, &levels, ctx.var.len(), self)
     }
 }
 
@@ -175,7 +218,25 @@ fn parse_sterm_atom(pair: Pair<Rule>) -> Term {
             let body = parse_term(inner_rules.next().unwrap());
             Term::Fun(true, tele, Box::new(body))
         }
-        Rule::ttype => Term::Type(Univ::set()),
+        Rule::ttype => {
+            let mut inner_rules = pair.into_inner().rev();
+            let level = inner_rules.next();
+            let sort = inner_rules.next();
+
+            let sort = sort.map_or(Sort::Type(), |pair|
+                match pair.as_str() {
+                    "SProp" => Sort::SProp(),
+                    "Prop" => Sort::Prop(),
+                    "Type" => Sort::Type(),
+                    s => Sort::Var(s.to_string())
+                });
+
+            let level = level.map_or(Level { vars: BTreeMap::new() }, parse_level);
+
+            Term::Type(Univ { sort, level })
+        }
+        Rule::tprop => Term::Type(Univ { sort: Sort::Prop(), level: Level { vars: BTreeMap::from([(String::new(), 0)]) } }),
+        Rule::tsprop => Term::Type(Univ { sort: Sort::SProp(), level: Level { vars: BTreeMap::from([(String::new(), 0)]) } }),
         Rule::tlet => {
             let mut inner_rules = pair.into_inner();
             let name = inner_rules.next().unwrap().as_str().to_string();
@@ -183,6 +244,33 @@ fn parse_sterm_atom(pair: Pair<Rule>) -> Term {
             let body = parse_term(inner_rules.next().unwrap());
             let cont = parse_term(inner_rules.next().unwrap());
             Term::Fun(false, VecDeque::from([(name, ty, Some(body))]), Box::new(cont))
+        }
+        _ => unreachable!()
+    }
+}
+
+fn parse_level(pair: Pair<Rule>) -> Level {
+    match pair.as_rule() {
+        Rule::name => {
+            let u = pair.as_str().to_string();
+            Level { vars: BTreeMap::from([(u, 0)]) }
+        }
+        Rule::ladd => {
+            let mut inner_rules = pair.into_inner();
+            let u = inner_rules.next().unwrap().as_str().to_string();
+            let i = inner_rules.next().unwrap().as_str().parse::<usize>().unwrap();
+            Level { vars: BTreeMap::from([(u, i)]) }
+        }
+        Rule::lmax => {
+            let mut lvs = pair.into_inner().map(parse_level);
+            let mut u = lvs.next().unwrap().vars;
+            for v in lvs {
+                for (x, i) in v.vars.into_iter() {
+                    let j = u.get(&x).unwrap_or(&0);
+                    u.insert(x, std::cmp::max(i, *j));
+                }
+            }
+            Level { vars: u }
         }
         _ => unreachable!()
     }

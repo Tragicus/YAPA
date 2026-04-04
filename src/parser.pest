@@ -37,12 +37,21 @@ sterm = { ( paren_term | fun | forall | ttype | tlet | name )+ }
 paren_term = { "(" ~ term ~ ")" }
 fun = { "fun" ~ tele ~ "=>" ~ term }
 forall =  { "forall" ~ tele ~ "," ~ term }
-ttype = { "Type" }
+ttype = { "Type" ~ ("@{" ~ (name ~ ";")? ~ level ~ "}")? }
+tprop = { "Prop" }
+tsprop = { "SProp" }
 tlet = { "let" ~ name ~ ":" ~ term ~ ":=" ~ term ~ "in" ~ term }
+
+levels = { level+ }
+level = { lmax | ladd | name }
+lmax = { "max(" ~ level ~ ("," ~ level)* }
+ladd = { name ~ "+" ~ integer }
 
 keyword = { "in" }
 
 name = @{ !(keyword ~ WHITESPACE) ~ ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*) }
 names = { name+ }
+
+integer = @{ ASCII_DIGIT+ }
 
 string = @{ (!"\"" ~ ANY)* }

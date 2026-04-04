@@ -123,6 +123,7 @@ impl Context {
     }
 
     pub fn fresh_const(&mut self, v: Name) -> Result<Term, Error> {
+        assert!(self.univ.levels[0].1.len() + 1 == self.univ.model.len());
         let (uctx, _, _) = self.find_const(&v)?;
         let (s, u) = self.univ.append(uctx.clone());
         Ok(Term::Const(v, s, u))
@@ -154,10 +155,20 @@ impl Context {
     }
 
     pub fn push_const(&mut self, c: Name, t: (Term, Option<Term>)) -> Result<&mut Self, Error> {
+        assert!(self.univ.levels[0].1.len() + 1 == self.univ.model.len());
         let (ty, t) = t;
-        let (uctx, s, u) = self.keep_univs(&ty)?;
-        let ty = ty.to_kernel(self)?.subst_univ(&s, &u)?;
+        // We turn ty into a kernel term to get rid of the holes before computing the univers
+        // levels to keep.
+        let (fs, fu) = ty.free_univs(self);
+        let mut uctx = self.univ.clone();
+        let (s, u) = uctx.keep_univs(fs, fu)?;
+        let ty = ty.to_kernel(self)?;
+        let ty = ty.subst_univ(&s, &u)?;
         let t = t.map_or(Ok::<_, Error>(None), |t| Ok(Some(t.to_kernel(self)?.subst_univ(&s, &u)?)))?;
+        let (s, u) = uctx.optimize()?;
+        let ty = ty.subst_univ(&s, &u)?;
+        let t = t.map_or(Ok::<_, Error>(None), |t| Ok(Some(t.subst_univ(&s, &u)?)))?;
+        //println!("push_const {} : {:?} = {:?} in {:?}", c, ty, t, uctx);
         self.cst.insert(c, (uctx, ty, t));
         Ok(self)
     }
@@ -173,7 +184,7 @@ impl Context {
         };
         let mut ty = ty.unwrap_or_else(|| {
             let t = Term::Hole(self.hole.len()).apps(args.clone());
-            let mut ty = Term::Type(Univ::set());
+            let mut ty = Term::Type(self.univ.new_univ(None, None));
             if with_ctx { ty = ty.forall(self.var.clone().into_iter().collect()) };
             self.hole.push(HoleContext { name: v.clone() + "_ty", ty: ty, body: None, cstr: Vec::new() });
             self.commits.push(Commit::PushHole());
@@ -280,28 +291,36 @@ impl Context {
 
     //FIXME: Find a better name.
     //Produces a commit of the context, to be used in restore
-    pub fn save(&mut self) -> usize {
-        self.commits.len()
+    pub fn save(&mut self) -> (usize, univ::Context) {
+        (self.commits.len(), self.univ.clone())
     }
 
     //Backtracks the context to its state when the commit was produced
-    pub fn restore(&mut self, commit: usize) {
-        while self.commits.len() != commit {
+    pub fn restore(&mut self, commit: (usize, univ::Context)) -> &mut Self {
+        while self.commits.len() != commit.0 {
             match self.commits.pop().unwrap() {
                 Commit::PushHole() => { self.hole.pop(); },
                 Commit::InstantiateHole(v, t) => { self.hole.get_mut(v).unwrap().body = t; }
                 Commit::PushHoleConstraint(v) => { self.hole.get_mut(v).unwrap().cstr.pop(); }
             };
         }
+
+        self.univ = commit.1;
+        self
     }
 
-    pub fn reset_holes(&mut self) -> &Self {
+    pub fn reset_holes(&mut self) -> &mut Self {
         self.hole = Vec::new();
         self
     }
 
-    pub fn new_univ(&mut self) -> Univ {
-        self.univ.new_univ()
+    pub fn reset_univs(&mut self) -> &mut Self {
+        self.univ = univ::Context::new();
+        self
+    }
+
+    pub fn new_univ(&mut self, s: Option<String>, u: Option<String>) -> Univ {
+        self.univ.new_univ(s, u)
     }
 
     pub fn add_sort_constraint(&mut self, s1: Sort, s2: Sort) -> Result<&mut Self, Error> {
@@ -317,38 +336,6 @@ impl Context {
     pub fn add_constraint(&mut self, u1: Univ, u2: Univ) -> Result<&mut Self, Error> {
         self.univ.add_constraint(u1, u2)?;
         Ok(self)
-    }
-
-    // Prunes the sort and level variables that do not appear in t, producing a new universe
-    // context.
-    pub fn keep_univs(&mut self, t: &Term) -> Result<(univ::Context, Vec<Sort>, Vec<Level>), Error> {
-        let (fs, fu) = t.free_univs(self);
-
-        // We instanciate every sort variable outside of fs by its upper bound and rename the
-        // others so that they form an initial segment of NN.
-        let mut k = 0;
-        let substs = (0..self.univ.sorts.len()).map(|s| Ok(if fs.contains(&s) { k = k+1; Sort::Var(k-1) } else { self.univ.sorts.get(s).ok_or(Error::UnboundSort(s.clone()))?.1.clone() })).collect::<Result<_, Error>>()?;
-
-        let mut univ = self.univ.clone();
-
-        let mut k = 0;
-        let mut substu: Vec<_> = (0..self.univ.model.len()).map(|u| if fu.contains(&u) { 
-            k = k+1;
-            Level { vars: BTreeMap::from([(k, 0)]) }
-        } else {
-            univ.minimize_level(u.clone())
-        }).collect();
-
-        substu = substu.clone().into_iter().enumerate().map(|(i, u)| Ok::<_, Error>(if fu.contains(&i) { u } else {
-            Level { vars: u.vars.into_iter().map(|(u, i)| Ok::<_, Error>((substu.get(u).ok_or(Error::UnboundUniv(u.clone()))?.vars.keys().next().unwrap().clone(), i))).collect::<Result<_, _>>()? }
-        })).collect::<Result<_, _>>()?;
-
-        univ.sorts = univ.sorts.into_iter().enumerate().filter(|(i, _)| fs.contains(&i)).map(|(_, s)| s).collect();
-        univ.levels = univ.levels.into_iter().enumerate().filter(|(i, _)| fu.contains(&i)).map(|(_, u)| u).collect();
-        univ.model = univ.model.into_iter().enumerate().filter(|(i, _)| fu.contains(&i)).map(|(_, u)| u).collect();
-
-        univ.minimize_model();
-        Ok((univ, substs, substu))
     }
 }
 

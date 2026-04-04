@@ -118,8 +118,8 @@ impl Context {
         }
     }
 
-    pub fn new_univ(&mut self) -> Univ {
-        self.univ.new_univ()
+    pub fn new_univ(&mut self, s: Option<String>, u: Option<String>) -> Univ {
+        self.univ.new_univ(s, u)
     }
 
     pub fn add_sort_constraint(&mut self, s1: Sort, s2: Sort) -> Result<&mut Self, Error> {

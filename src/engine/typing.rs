@@ -32,10 +32,26 @@ pub fn unify_rigid(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Erro
         (Term::Const(c1, s1, u1), Term::Const(c2, s2, u2)) =>
             c1 == c2 &&
             s1.len() == s2.len() &&
-            u1.len() == u2.len() &&
-            s1.iter().zip(s2.iter()).map(|(s1, s2)| { ctx.add_sort_constraint(s1.clone(), s2.clone())?; Ok::<_, Error>(()) }).collect::<Result<(), _>>().map(|_| true)? &&
-            u1.iter().zip(u2.iter()).map(|(u1, u2)| { ctx.add_level_constraint(u1.clone(), u2.clone())?; Ok::<_, Error>(()) }).collect::<Result<(), _>>().map(|_| true)?,
-        (Term::Type(_), Term::Type(_)) => true,
+            u1.len() == u2.len() && {
+                let commit = ctx.save();
+                s1.iter().zip(s2.iter())
+                    .map(|(s1, s2)| { 
+                        ctx.add_sort_constraint(s1.clone(), s2.clone())?; ctx.add_sort_constraint(s2.clone(), s1.clone()).map(|_| ())
+                    }).collect::<Result<(), _>>()
+                .and_then(|_| u1.iter().zip(u2.iter())
+                    .map(|(u1, u2)| {
+                        ctx.add_level_constraint(u1.clone(), u2.clone())?; ctx.add_level_constraint(u2.clone(), u1.clone()).map(|_| ())
+                    }).collect::<Result<(), _>>())
+                .map(|_| true)
+                .unwrap_or_else(|_| { ctx.restore(commit); false })
+            },
+        (Term::Type(u1), Term::Type(u2)) => {
+            let commit = ctx.save();
+            ctx.add_constraint(u1.clone(), u2.clone()).map(|_| ())
+                .and_then(|_| ctx.add_constraint(u2.clone(), u1.clone()).map(|_| ()))
+                .map(|_| true)
+                .unwrap_or_else(|_| { ctx.restore(commit); false })
+        }
         (Term::Fun(forall1, tele1, body1), Term::Fun(forall2, tele2, body2)) if forall1 == forall2 => {
             let mut tele1 = tele1.clone();
             let mut tele2 = tele2.clone();
@@ -61,17 +77,17 @@ pub fn unify_instantiate(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool
 
 // Main loop of the unification algorithm
 pub fn unify_loop(ctx: &mut Context, o1: &Term, o2: &Term, t1: &Term, t2: &Term) -> Result<bool, Error> {
-    //println!("{} =?= {}", t1.pp(ctx)?, t2.pp(ctx)?);
+    //println!("{:?} =?= {:?}", t1/*.pp(ctx)?*/, t2/*.pp(ctx)?*/);
     let ctx_commit = ctx.save();
     if unify_rigid(ctx, t1, t2)? { return Ok(true); }
-    ctx.restore(ctx_commit);
+    ctx.restore(ctx_commit.clone());
     if t2.may_reduce(ctx)? { let t2 = unify_reduce(ctx, t2.clone())?; return unify_loop(ctx, o1, o2, t1, &t2) };
     if t1.may_reduce(ctx)? { let t1 = unify_reduce(ctx, t1.clone())?; return unify_loop(ctx, o1, o2, &t1, t2) };
     Ok(match (t1.head(), t2.head()) {
         (Term::Hole(_), Term::Hole(_)) => {
             //TODO: save ctx
             if unify_instantiate(ctx, t2, o1)? { return Ok(true) };
-            ctx.restore(ctx_commit);
+            ctx.restore(ctx_commit.clone());
             if unify_instantiate(ctx, t1, o2)? { return Ok(true) };
             ctx.restore(ctx_commit);
             ctx.register_constraint(t2.clone(), t1.clone())?;
@@ -94,7 +110,10 @@ pub fn unify_loop(ctx: &mut Context, o1: &Term, o2: &Term, t1: &Term, t2: &Term)
 }
 
 pub fn unify(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool, Error> {
-    unify_loop(ctx, t1, t2, t1, t2)
+    assert!(ctx.univ.levels[0].1.len() + 1 == ctx.univ.model.len());
+    let u = unify_loop(ctx, t1, t2, t1, t2);
+    assert!(ctx.univ.levels[0].1.len() + 1 == ctx.univ.model.len());
+    u
 }
 
 impl Term {
@@ -105,6 +124,7 @@ impl Term {
             Err(Error::TypeMismatch(b.clone(), ty.clone()))}
         }
         //println!("type_of {:?}", self);
+        assert!(ctx.univ.levels[0].1.len() + 1 == ctx.univ.model.len());
         Ok(match self {
             Term::Var(v) => ctx.get_var_type(v)?.clone(),
             Term::Const(c, s, u) => ctx.get_const_type(c)?.clone().subst_univ(&s, &u)?,

@@ -191,14 +191,16 @@ impl Term {
             Term::Var(_) => self,
             Term::Const(c, s, u) => Term::Const(c, 
                 s.into_iter().map(|s| Ok(match s { Sort::Var(s) => sorts.get(s).ok_or(Error::UnboundSort(s))?.clone(), _ => s })).collect::<Result<_, Error>>()?,
-                u.into_iter().map(|u| Ok(Level { vars: u.vars.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>(if v == 0 { w } else { (Level { vars: w }).max(levels.get(v - 1).ok_or(Error::UnboundUniv(v-1))?.clone().add(n)).vars }))? })
+                u.into_iter().map(|u| Ok::<_, Error>(Level { vars: u.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>((Level { vars: w }).max(if v == 0 { Level { vars: BTreeMap::from([(v, n)]) } } else { levels.get(v).ok_or(Error::UnboundUniv(v))?.clone().add(n) }).vars))? })
             ).collect::<Result<_, _>>()?),
             Term::App(args) => Term::App(args.into_iter().map(|a| Rc::unwrap_or_clone(a).subst_univ(sorts, levels).map(|t| t.into())).collect::<Result<_, _>>()?),
             Term::Fun(b, tele, body) => Term::Fun(b, tele.into_iter().map(|(v, ty, body)| Ok::<_, Error>((v, ty.subst_univ(sorts, levels)?, body.map(|body| body.subst_univ(sorts, levels)).transpose()?))).collect::<Result<_, _>>()?, Rc::unwrap_or_clone(body).subst_univ(sorts, levels)?.into()),
-            Term::Type(v) => Term::Type(Univ {
-                sort: match v.sort { Sort::Var(s) => sorts.get(s).ok_or(Error::UnboundSort(s))?.clone(), _ => v.sort },
-                level: Level { vars: v.level.vars.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>(if v == 0 { w } else { (Level { vars: w }).max(levels.get(v - 1).ok_or(Error::UnboundUniv(v-1))?.clone().add(n)).vars }))? }
-            }),
+            Term::Type(v) => {
+                Term::Type(Univ {
+                    sort: match v.sort { Sort::Var(s) => sorts.get(s).ok_or(Error::UnboundSort(s))?.clone(), _ => v.sort },
+                    level: Level { vars: v.level.into_iter().try_fold(BTreeMap::new(), |w, (v, n)| Ok::<_, Error>((Level { vars: w }).max(if v == 0 { Level { vars: BTreeMap::from([(v, n)]) } } else { levels.get(v).ok_or(Error::UnboundUniv(v))?.clone().add(n) }).vars))? }
+                })
+            }
         })
     }
 
