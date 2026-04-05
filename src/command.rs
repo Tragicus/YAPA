@@ -90,7 +90,7 @@ impl Command {
                 oty.type_of(&mut ctx.engine)?.dest_type(&mut ctx.engine)?;
                 let t = t.capture_vars(&mut ctx.engine)?;
                 let ty = t.type_of(&mut ctx.engine)?;
-                let ty = if let Ok(true) = unify(&mut ctx.engine, &ty, &oty) {
+                let ty = if unify(&mut ctx.engine, &ty, &oty, true)? {
                     oty
                 } else {
                     Err(crate::engine::error::Error::TypeMismatch(t.clone(), oty.clone()))?
@@ -122,7 +122,7 @@ impl Command {
                 if let Status::Proofmode(v, ty, t, goals) = &ctx.status {
                     if goals.len() != 0 { Err(Error::OpenGoals())? };
                     let ty0 = t.type_of(&mut ctx.engine)?;
-                    if unify(&mut ctx.engine, &ty, &ty0)? {
+                    if unify(&mut ctx.engine, &ty, &ty0, true)? {
                         ctx.engine.push_const(v.clone(), (ty.clone(), if transparent { Some(t.clone()) } else { None }))?;
                         ctx.engine.reset_holes();
                         ctx.engine.reset_univs();

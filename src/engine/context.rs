@@ -201,7 +201,7 @@ impl Context {
         //println!("instantiate_hole {:?} <- {:?}", tv, t);
         let tvty = tv.type_of(self)?;
         let ty = t.type_of(self)?;
-        if !unify(self, &tvty, &ty)? { return Err(Error::TypeMismatch(tvty, t)) };
+        if !unify(self, &tvty, &ty, true)? { return Err(Error::TypeMismatch(tvty, t)) };
         let (v, args) = tv.clone().behead();
         let v = v.dest_hole()?;
         let nargs = args.len();

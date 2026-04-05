@@ -523,7 +523,7 @@ impl Term {
             t => {
                 //TODO: generate fresh universe
                 let u = ctx.univ.new_univ(None, None);
-                if unify(ctx, &Term::Type(u.clone()), &t)? { Ok(u) } else {
+                if unify(ctx, &Term::Type(u.clone()), &t, false)? { Ok(u) } else {
                     Err(Error::NotAType(t))
                 }
             }

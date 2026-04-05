@@ -70,7 +70,7 @@ impl Tactic {
                             let mut newgoals: VecDeque<_>;
                             loop {
                                 let ty = t.type_of(ctx)?;
-                                if crate::engine::typing::unify(ctx, &ty, &tg)? {
+                                if crate::engine::typing::unify(ctx, &ty, &tg, true)? {
                                     newgoals = t.collect_goals(ctx)?.into_iter().collect();
                                     newgoals.make_contiguous().sort();
                                     ctx.instantiate_hole(&g, t)?;
