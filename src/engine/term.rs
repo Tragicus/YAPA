@@ -228,7 +228,7 @@ impl Term {
             Term::Const(_, _, _) | Term::Type(_) => init,
             Term::App(args) => args.iter().fold(init, |t, arg| f(ctx, &*arg, t)),
             Term::Fun(_, tele, body) =>
-                ctx.fold_telescope(|ctx, (_, ty, t), x| { let x = f(ctx, ty, x); match t { None => x, Some(t) => f(ctx, t, x) } }, &mut tele.iter(), init, |ctx, x| f(ctx, &*body, x)),
+                ctx.fold_telescope(|ctx, (_, ty, t), x| { let x = f(ctx, ty, x); Ok::<T, std::convert::Infallible>(match t { None => x, Some(t) => f(ctx, t, x) }) }, &mut tele.iter(), init, |ctx, x| Ok(f(ctx, &*body, x))).unwrap(),
             Term::Hole(h) => {
                 let t = ctx.get_hole_body(h)?;
                 let t = match t { Some(t) => t.clone(), None => Term::Var(*h) };
@@ -350,14 +350,13 @@ impl Term {
                         _ => Ok(Term::App(self.dest_app()?.into_iter().map(|x| Rc::unwrap_or_clone(x).eliminate_patterns(ctx, pats)).collect::<Result<Vec<_>, _>>()?.into_iter().map(|x| x.into()).collect()))
                     },
                 Term::Fun(forall, tele, body) => {
-                    ctx.fold_telescope(|ctx, (v, t, b), tele: Result<_, Error>| {
-                        let mut tele = tele?;
+                    ctx.fold_telescope(|ctx, (v, t, b), mut tele| {
                         let t = t.clone().eliminate_patterns(ctx, pats)?;
                         let b = b.clone().map(|b| b.eliminate_patterns(ctx, pats)).transpose()?;
                         tele.push_back((v.clone(), t, b));
                         Ok(tele)
-                    }, &mut tele.iter(), Ok(VecDeque::new()), |ctx, tele|
-                    Ok(Term::Fun(forall, tele?, Rc::unwrap_or_clone(body).eliminate_patterns(ctx, pats)?.into())))
+                    }, &mut tele.iter(), VecDeque::new(), |ctx, tele|
+                    Ok(Term::Fun(forall, tele, Rc::unwrap_or_clone(body).eliminate_patterns(ctx, pats)?.into())))
                 }
                 Term::Hole(v) => {
                     let tv = ctx.get_hole_body(&v)?.clone();
@@ -420,10 +419,10 @@ impl Term {
                 s
             }
             Term::Fun(forall, tele, body) => 
-                ctx.fold_telescope(|ctx, (v, ty, b), s: Result<_, Error>| {
-                    Ok(s? + &(" (".to_string() + v + " : " + &ty.pp(ctx)? + &b.as_ref().map_or(Ok::<_, Error>("".to_string()), |b| Ok(" := ".to_owned() + &b.pp(ctx)?))? + ")"))
-                }, &mut tele.iter(), Ok((if forall { "forall" } else { "fun" }).to_string()), |ctx, s| {
-                    Ok::<_, Error>(s? + (if forall { ", " } else { " => " }) + &body.pp(ctx)?)
+                ctx.fold_telescope(|ctx, (v, ty, b), s| {
+                    Ok(s + &(" (".to_string() + v + " : " + &ty.pp(ctx)? + &b.as_ref().map_or(Ok::<_, Error>("".to_string()), |b| Ok(" := ".to_owned() + &b.pp(ctx)?))? + ")"))
+                }, &mut tele.iter(), (if forall { "forall" } else { "fun" }).to_string(), |ctx, s| {
+                    Ok::<_, Error>(s + (if forall { ", " } else { " => " }) + &body.pp(ctx)?)
                 })?,
             Term::Type(u) => "Type@(".to_string() + &u.to_string() + ")",
             Term::Hole(i) => "?".to_string() + &ctx.get_hole_name(&i)?.clone()

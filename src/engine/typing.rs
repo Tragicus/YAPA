@@ -167,19 +167,16 @@ impl Term {
                 })?
             }
             Term::Fun(false, tele, body) => {
-                ctx.fold_telescope(|ctx, (_, ty, b), ok: Result<_, Error>| {
-                    let ok = ok?;
+                ctx.fold_telescope(|ctx, (_, ty, b), _| {
                     ty.type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
                     b.as_ref().map_or(Ok(()), |b| check_let(ctx, &b, ty))?;
-                    Ok(ok)
-                }, &mut tele.iter(), Ok(()), |ctx, ok| {
-                    ok?;
+                    Ok(())
+                }, &mut tele.iter(), (), |ctx, _| {
                     Ok::<_, Error>((**body).clone().type_of(ctx)?.forall(tele.clone()))
                 })?
             }
             Term::Fun(true, tele, body) => {
-                ctx.fold_telescope(|ctx, (_, ty, b), univs: Result<_, Error>| {
-                    let mut univs = univs?;
+                ctx.fold_telescope(|ctx, (_, ty, b), mut univs| {
                     let u = ty.clone().type_of(ctx)?;
                     match b {
                         None => {
@@ -189,8 +186,7 @@ impl Term {
                         Some(b) => check_let(ctx, &b, ty)?
                     };
                     Ok(univs)
-                }, &mut tele.iter(), Ok(VecDeque::new()), |ctx, univs| {
-                    let univs = univs?;
+                }, &mut tele.iter(), VecDeque::new(), |ctx, univs| {
                     let v = (**body).clone().type_of(ctx)?.whd(ctx, WhdFlags::default())?.dest_type(ctx)?;
                     Ok::<_, Error>(Term::Type(univs.into_iter().fold(v, |v, u| u.max(v))))
                 })?

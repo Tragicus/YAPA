@@ -51,24 +51,22 @@ impl Goal {
 
     // Sets the correct context to work on the provided goal. The closure takes said context and
     // the target of the goal (i.e. the term to instantiate).
-    pub fn enter<T, F : FnOnce(&mut crate::engine::context::Context, Term) -> T>(&mut self, ctx: &mut crate::engine::context::Context, f: F) -> T {
+    pub fn enter<T, E, F : FnOnce(&mut crate::engine::context::Context, Term) -> Result<T, E>>(&mut self, ctx: &mut crate::engine::context::Context, f: F) -> Result<T, E> {
         std::mem::swap(&mut ctx.var, &mut self.ctx);
         let target = self.target(ctx);
-        let t = f(ctx, target);
+        let t = f(ctx, target)?;
         std::mem::swap(&mut ctx.var, &mut self.ctx);
-        t
+        Ok(t)
     }
 
     pub fn pp(&self, ctx: &mut crate::engine::context::Context) -> Result<String, Error> {
         let tg = self.target(ctx).type_of(ctx)?.whd(ctx, WhdFlags::empty().beta())?;
         let mut vars = VecDeque::new();
         std::mem::swap(&mut vars, &mut ctx.var);
-        let r = ctx.fold_telescope(|ctx, (v, ty, b), s: Result<_, Error>| {
-            let s = s?;
+        let r = ctx.fold_telescope(|ctx, (v, ty, b), s| {
             let st = ty.pp(ctx)?;
             Ok(s + &v + " : " + &st + &b.as_ref().map_or(Ok::<_, Error>("".to_string()), |b| Ok(" := ".to_string() + &b.pp(ctx)?))? + "\n")
-        }, &mut vars.iter(), Ok("".to_string()), |ctx, s| {
-            let s = s?;
+        }, &mut vars.iter(), "".to_string(), |ctx, s| {
             Ok(s + "\n==========================\n\n" + &tg.pp(ctx)? + "\n")
         });
         std::mem::swap(&mut vars, &mut ctx.var);

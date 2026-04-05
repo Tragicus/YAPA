@@ -154,8 +154,8 @@ impl Tactic {
                             _ => ()
                         };
                     }
-                });
-                Ok(VecDeque::new())
+                    Ok(VecDeque::new())
+                })
             }
             Tactic::Seq(tacs) => exec_seq(&tacs, ctx, goal, 0),
         }?;

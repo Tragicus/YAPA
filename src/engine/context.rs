@@ -266,23 +266,23 @@ impl Context {
         self.var.len()
     }
 
-    pub fn with_var<F, T>(&mut self, v: (Name, Term, Option<Term>), f: F) -> T
-        where F: FnOnce(&mut Context) -> T {
+    pub fn with_var<F, T, E>(&mut self, v: (Name, Term, Option<Term>), f: F) -> Result<T, E>
+        where F: FnOnce(&mut Context) -> Result<T, E> {
         self.push_var(v);
-        let t = f(self);
+        let t = f(self)?;
         self.pop_var();
-        t
+        Ok(t)
     }
 
-    pub fn fold_telescope<'a, T, U, I, F, G>(&mut self, f: F, tele: &mut I, init: T, g: G) -> U
+    pub fn fold_telescope<'a, T, U, I, E, F, G>(&mut self, f: F, tele: &mut I, init: T, g: G) -> Result<U, E>
         where I: Iterator<Item = &'a Binder>,
-              F: Fn(&mut Context, &'a Binder, T) -> T,
-              G: FnOnce(&mut Context, T) -> U {
+              F: Fn(&mut Context, &'a Binder, T) -> Result<T, E>,
+              G: FnOnce(&mut Context, T) -> Result<U, E> {
         let x = tele.next();
         match x {
             None => g(self, init),
             Some(b) => {
-                let t = f(self, b, init);
+                let t = f(self, b, init)?;
                 let (v, ty, b) = b.clone();
                 self.with_var((v, ty, b), |ctx| ctx.fold_telescope(f, tele, t, g))
             }

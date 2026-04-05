@@ -28,7 +28,7 @@ impl Error {
             _ => None
         };
         let s = g.map_or(Ok("".to_string()), |g| g.pp(&mut ctx.engine))?;
-        Ok(s + &(match self {
+        Ok(s + "\n" + &(match self {
             Error::TypeError(e) => e.pp(&mut ctx.engine)?,
             Error::OpenGoals() => "Open goals remain.".to_string(),
             Error::NoGoal() => "No such goal.".to_string(),
