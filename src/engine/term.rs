@@ -171,7 +171,11 @@ impl Term {
         where F: Fn(VarType) -> Term {
         match self {
             Term::Var(i) => if i < k { self } else { (f (i - k)).bump(k) },
-            Term::App(args) => Term::App(args.iter().map(|x| (**x).clone().subst_aux(f, k).into()).collect()),
+            Term::App(args) => {
+                let mut args = args.into_iter();
+                let hd = Rc::unwrap_or_clone(args.next().unwrap()).subst_aux(f, k);
+                hd.apps(args.map(|x| Rc::unwrap_or_clone(x).subst_aux(f, k).into()).collect())
+            }
             Term::Fun(forall, tele, body) => {
                 let mut k = k;
                 let mut tele0 = VecDeque::new();
@@ -392,7 +396,7 @@ impl Term {
             Term::Var(i) => ctx.get_var_name(&i)?.clone(),
             Term::Const(v, s, u) => {
                 let mut r = v.clone();
-                if s.len() + u.len() == 0 { r } else {
+                if s.len() + u.len() == 1 { r } else {
                     r = r + "@{";
                     if s.len() != 0 {
                         let mut s = s.iter();
@@ -402,8 +406,9 @@ impl Term {
                         };
                     };
                     r = r + "|";
-                    if u.len() != 0 {
+                    if u.len() != 1 {
                         let mut u = u.iter();
+                        u.next();
                         r = r + &u.next().unwrap().to_string();
                         for u in u {
                             r = r + ", " + &u.to_string();

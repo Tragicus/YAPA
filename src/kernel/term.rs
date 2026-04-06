@@ -160,7 +160,11 @@ impl Term {
         where F: Fn(VarType) -> Term {
         match self {
             Term::Var(i) => if i < k { self } else { (f (i - k)).bump(k) },
-            Term::App(args) => Term::App(args.iter().map(|x| (**x).clone().subst_aux(f, k).into()).collect()),
+            Term::App(args) => {
+                let mut args = args.into_iter();
+                let hd = Rc::unwrap_or_clone(args.next().unwrap()).subst_aux(f, k);
+                hd.apps(args.map(|x| Rc::unwrap_or_clone(x).subst_aux(f, k).into()).collect())
+            }
             Term::Fun(forall, tele, body) => {
                 let mut k = k;
                 let mut tele0 = VecDeque::new();

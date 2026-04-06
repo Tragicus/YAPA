@@ -99,7 +99,7 @@ pub fn unify_instantiate(ctx: &mut Context, t1: &Term, t2: &Term) -> Result<bool
 
 // Main loop of the unification algorithm
 pub fn unify_loop(ctx: &mut Context, o1: &Term, o2: &Term, cumul: bool, t1: &Term, t2: &Term) -> Result<bool, Error> {
-    //println!("{:?} =?= {:?}", t1/*.pp(ctx)?*/, t2/*.pp(ctx)?*/);
+    //println!("{} =?= {}", t1, t2);
     let ctx_commit = ctx.save();
     if unify_rigid(ctx, t1, t2, cumul)? { return Ok(true); }
     ctx.restore(ctx_commit.clone());
@@ -146,7 +146,7 @@ impl Term {
             if unify(ctx, ty, &bty, true)? { Ok(()) } else {
             Err(Error::TypeMismatch(b.clone(), ty.clone()))}
         }
-        //println!("type_of {:?}", self);
+        //println!("type_of {}", self);
         assert!(ctx.univ.levels[0].1.len() + 1 == ctx.univ.model.len());
         Ok(match self {
             Term::Var(v) => ctx.get_var_type(v)?.clone(),

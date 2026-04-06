@@ -70,6 +70,7 @@ impl Command {
                 ctx.enter_goal0(|ctx| {
                     let t = ctx.engine.get_const_body(&c)?.ok_or(crate::engine::error::Error::NoBody(crate::engine::term::Term::Const(c, vec![], vec![])))?;
                     println!("{}", t.pp(&mut ctx.engine)?);
+                    ctx.engine.reset_univs();
                     Ok(())
                 })
             }
@@ -79,6 +80,7 @@ impl Command {
                     let t = t.capture_vars(&mut ctx.engine)?;
                     let ty = t.type_of(&mut ctx.engine)?;
                     println!("{} : {}", t.pp(&mut ctx.engine)?, ty.pp(&mut ctx.engine)?);
+                    ctx.engine.reset_univs();
                     Ok(())
                 })
             }
@@ -139,6 +141,7 @@ impl Command {
                 ctx.enter_goal0(|ctx| {
                     let t = t.capture_vars(&mut ctx.engine)?.whd(&mut ctx.engine, WhdFlags::default())?;
                     println!("{}", t.pp(&mut ctx.engine)?);
+                    ctx.engine.reset_univs();
                     Ok(())
                 })
             }
