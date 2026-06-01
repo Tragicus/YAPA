@@ -3,3 +3,7 @@ module Kernel = Kernel
 module Engine = Engine
 module Lexer = Lexer
 module Parser = Parser
+module Term = Term
+module Commands = Commands
+module Goal = Goal
+module Printers = Printers

@@ -1,5 +1,5 @@
 (executable
- (public_name YAPA)
+ (public_name yapa)
  (name main)
  (modes byte exe)
- (libraries YAPA))
+ (libraries Yapa))

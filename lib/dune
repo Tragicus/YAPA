@@ -4,5 +4,5 @@
 (ocamllex lexer)
 
 (library
- (name YAPA)
+ (name Yapa)
  (libraries Utils Kernel Engine))

@@ -1,183 +1,141 @@
-open Engine.Term.Context.Monad.Notations
-
-type univ =
-  | Var of string
-  | Max of univ list
-  | Shift of univ * int
-
-type term =
-  | Const of string * string list option
-  | Fun of term Engine.Term.telescope * term
-  | App of term list (* FIXME: slow *)
-  | Type of string option
-  | Pi of term Engine.Term.telescope * term
-  | Let of string * term * term * term
-  | Ind of (* name *) string * (* arity *) term * (* constructors *) term list
-  | Construct of term * int
-  | Case of (* recursive *) bool *
-            (* subject *) term *
-            (* inductive *) term option *
-            (* return type *) term * 
-            (* branches *) term list
-  | THole
-  | Hole
-
-let destApp = function
-  | App (f :: args) -> f, args
-  | f -> f, []
-
-let mkApp f args =
-  if args = [] then f else
-  let f, fargs = destApp f in
-  App (f :: fargs @ args)
-
-let mkFun f body =
-  if f = [] then body else
-  match body with
-  | Fun (tele, body) -> Fun (f @ tele, body)
-  | _ -> Fun (f, body)
-
-let mkPi f body =
-  if f = [] then body else
-  match body with
-  | Pi (tele, body) -> Pi (f @ tele, body)
-  | _ -> Pi (f, body)
-
-let rec elaborate ?(ictx=Utils.SMap.empty) ?(uctx=Utils.SMap.empty) (t : term) =
-  let capture_tele ictx uctx tele k =
-    let rec aux ictx uctx tele k revtele =
-      match tele with
-      | [] -> k ictx uctx (List.rev revtele)
-      | (v, t) :: tele ->
-        let* t = elaborate ~ictx ~uctx t in
-        let** depth = Engine.Term.Context.depth in
-        let ictx = Utils.SMap.add v depth ictx in
-        Engine.Term.Context.Monad.with_var (Some v, t, None) (aux ictx uctx tele k ((v, t) :: revtele)) in
-    aux ictx uctx tele k [] in
-  match t with
-  | Type (Some s) -> Engine.Term.Context.Monad.ret (Engine.Term.Type (if s = "" then Kernel.Univ.of_atom 0 0 else try Utils.SMap.find s uctx with Not_found -> failwith (String.cat "Unkown universe " s)))
-  | Type None -> let+ u = Engine.Term.Context.new_univ in Engine.Term.Type u
-  | App l ->
-    let+ l = List.fold_left (fun state t -> let* l = state in let+ t = elaborate ~ictx ~uctx t in t :: l) (Engine.Term.Context.Monad.ret []) l in
-    Engine.Term.App (List.rev l)
-  | Const (c, u) ->
-    (match Utils.SMap.find c ictx with
-    | v ->
-      if u <> None then failwith "Local variables do not have universe arguments." else
-      Engine.Term.Context.Monad.to_mut (
-      let+* depth = Engine.Term.Context.depth in
-      Engine.Term.Var (depth - 1 - v))
-    | exception _ ->
-    let** univ = Engine.Term.Context.get_const_univ c in
-    let+ newu = match u with
-      | None ->
-        let+ u = Engine.Term.Context.new_univs_with_constraints univ in
-        List.map (fun v -> Kernel.Univ.of_atom v 0) u
-      | Some u ->
-      if List.length u <> fst (Utils.IMap.max_binding univ) then
-        failwith (String.cat "Unexpected number of universe argument for conconstant stant " c) else
-      let u = List.map (fun u -> try Utils.SMap.find u uctx with Not_found -> failwith (String.cat "Unknown universe variable " u)) u in
-      let+ () = Engine.Term.Context.add_univ_constraints (Kernel.Univ.Context.subst (fun i -> if i = 0 then Kernel.Univ.static 0 else List.nth u (i-1)) univ) in
-      u in
-    Engine.Term.Const (newu, c))
-  | Fun (tele, body) ->
-    let+ tele, body = capture_tele ictx uctx tele (fun ictx uctx tele -> let+ t = elaborate ~ictx ~uctx body in tele, t) in
-    Engine.Term.Fun (tele, body)
-  | Pi (tele, body) ->
-    let+ tele, body = capture_tele ictx uctx tele (fun ictx uctx tele -> let+ t = elaborate ~ictx ~uctx body in tele, t) in
-    Engine.Term.Pi (tele, body)
-  | Let (v, ty, t, body) ->
-    let* ty = elaborate ~ictx ~uctx ty in
-    let* t = elaborate ~ictx ~uctx t in
-    let** depth = Engine.Term.Context.depth in
-    let+ body = 
-      Engine.Term.Context.Monad.with_var (Some v, ty, Some t) (
-        elaborate ~ictx:(Utils.SMap.add v depth ictx) ~uctx body
-      ) in
-    Engine.Term.Let (v, ty, t, body)
-  | Ind (v, a, c) ->
-    let* a = elaborate ~ictx ~uctx a in
-    let** depth = Engine.Term.Context.depth in
-    let ictx = Utils.SMap.add v depth ictx in
-    let+ c = 
-      Engine.Term.Context.Monad.with_var (Some v, Engine.Term.Var(0), None) (
-        let+ l = List.fold_left (fun state t -> let* l = state in let+ t = elaborate ~ictx ~uctx t in t :: l) (Engine.Term.Context.Monad.ret []) c in
-        List.rev l
-      ) in
-    Engine.Term.Ind (a, c)
-  | Construct (ind, i) -> let+ ind = elaborate ~ictx ~uctx ind in Engine.Term.Construct (ind, i)
-  | Case (r, s, ind, ret, br) ->
-    let* s = elaborate ~ictx ~uctx s in
-    let* ind = match ind with | None -> Engine.Term.typecheck s | Some ind -> elaborate ~ictx ~uctx ind in
-    let* ret = elaborate ~ictx ~uctx ret in
-    let* br = Engine.Term.Context.Monad.List.map (elaborate ~ictx ~uctx) br in
-    let+ ind =
-      try 
-        let** whind = Engine.Term.whd ind in
-        let _ =  Engine.Term.destInd whind in
-        Engine.Term.Context.Monad.ret ind
-      with _ -> 
-        let* a = Engine.Term.Context.new_type_evar in
-        let* c = Engine.Term.Context.Monad.List.map (fun _ -> Engine.Term.Context.new_type_evar) br in
-        Engine.Term.Context.Monad.ret (Engine.Term.Ind (a, c)) in
-    Engine.Term.mkApp (Engine.Term.Case (ind, r)) (ret :: br @ [s])
-  | THole -> let+ t = Engine.Term.Context.new_type_evar in t
-  | Hole -> let+ t = Engine.Term.Context.new_evar in t
+open Utils
+module E = Engine.Term
+module EC = E.Context
+module P = Term
+module PC = P.Context
 
 type t =
-  | Print of term
-  | Check of term
-  | Define of string * string list option * term Engine.Term.telescope * term * term
-  | Whd of term
-  | Eval of term
+  | Print of P.t
+  | Check of P.t
+  | Whd of P.t
+  | Eval of P.t
+  | Define of string * (string list * string list) option * P.t * P.t
+  | Tac of Tactic.t
+  | Qed of bool
+  | Skip
   | Stop
 
-let eval : t -> unit Engine.Term.Context.Monad.t = function
-  | Print (Const (c, _)) ->
-    let** body = Engine.Term.Context.get_const_body c in
-    let () = print_string c; print_string " := " in
-    let** () = Printer.Engine.pp_term body in
-    Engine.Term.Context.Monad.ret (print_newline ())
-  | Print _ ->
-    failwith "I can only print the body of constants"
-  | Check t ->
-    let* t = elaborate t in
-    let* ty = Engine.Term.typecheck t in
-    let** () = Printer.Engine.pp_term t in
-    print_string " : ";
-    let** () = Printer.Engine.pp_term ty in
-    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty }, (print_string "\n")
-  | Define (v, u, tele, ty, body) ->
-    let** () = fun ctx -> if Engine.Term.Context.depth ctx <> 0 then let () = Printer.Engine.pp_ctx ctx in failwith "nonempty context" else () in
-    let* uctx = match u with
-      | None -> Engine.Term.Context.Monad.ret (Utils.SMap.empty)
-      | Some u ->
-      let+ u = Engine.Term.Context.Monad.List.map (fun v -> let+ u = Engine.Term.Context.new_univ in (v, u)) u in
-      List.fold_left (fun uctx (v, u) -> Utils.SMap.add v u uctx) Utils.SMap.empty u in
-    let* ty = elaborate ~uctx (mkPi tele ty) in
-    let* body = elaborate ~uctx (mkFun tele body) in
-    let* tyb = Engine.Term.typecheck body in
-    let* b = Engine.Term.unify tyb ty in
-    if not b then fun ctx -> raise (Engine.Term.TypeError (ctx, Engine.Term.TypeMismatch (ty, body))) else
-    let* body, tyb = Engine.Term.elim_irrelevant_univs body in 
-    let** univ = fun ctx -> ctx.Engine.Term.univ in
-    let* () = Engine.Term.Context.push_const v (univ, tyb, body) in
-    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty; Engine.Term.evar = Utils.IMap.empty }, ()
-  | Whd t ->
-    let* t = elaborate t in
-    let** t' = Engine.Term.whd t in
-    let () = print_string "whd " in
-    let** () = Printer.Engine.pp_term t in
-    let () = print_string " := " in
-    let** () = Printer.Engine.pp_term t' in
-    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty }, (print_newline ())
-  | Eval t ->
-    let* t = elaborate t in
-    let** t' = Engine.Term.eval t in
-    let () = print_string "eval " in
-    let** () = Printer.Engine.pp_term t in
-    let () = print_string " := " in
-    let** () = Printer.Engine.pp_term t' in
-    fun ctx -> { ctx with Engine.Term.univ = Kernel.Univ.Context.empty }, (print_newline ())
-  | Stop -> failwith "Stop"
+type error =
+  | NoGoal
+  | OpenGoals
+  | Stop
 
+type status = | Idle | Proofmode of string * E.t * E.t * Goal.t list
+type context = EC.t * status
+
+exception Error of context * error
+
+module Context = struct
+  type t = context
+
+  let empty = (EC.empty, Idle)
+
+  let enter_goal0 f ctx = match ctx with
+    | _, Idle | _, Proofmode (_, _, _, []) -> raise (Error (ctx, NoGoal))
+    | ectx, Proofmode (_, _, _, g :: _) -> Goal.enter g f ectx
+
+  let goal_count ctx = match snd ctx with
+    | Idle -> 0
+    | Proofmode (_, _, _, gs) -> List.length gs
+
+  module Monad = struct
+    include Utils.ContextMonad(struct type t = context end)
+
+    let of_engine f (ctx, status) =
+      let ctx, r = f ctx in
+      (ctx, status), r
+  end
+end
+
+open Context.Monad.Notations
+
+let print cmd =
+  let (+) = String.cat in
+  match cmd with
+  | Print t -> "Print " + Term.print t
+  | Check t -> "Check " + Term.print t
+  | Whd t -> "Whd " + Term.print t
+  | Eval t -> "Eval " + Term.print t
+  | Define (c, su, ty, t) -> "Definition " + Term.print (Term.mkConst c (Option.map (fun (s, u) -> s, List.map (fun u -> SMap.singleton u 0) u) su)) + " : " + Term.print ty + " := " + Term.print t
+  | Tac tac -> Tactic.print tac
+  | Qed b -> if b then "Defined" else "Qed"
+  | Skip -> "Skip"
+  | Stop -> "Stop"
+
+let eval cmd : unit Context.Monad.t =
+  let (+) = String.cat in
+  let ret = Context.Monad.ret in
+(*   let () = print_endline (print cmd) in *)
+  match cmd with
+  | Print t ->
+    let (c, _) = try P.destConst t with _ -> failwith "I can only print the body of constants" in
+    let* (univ, _, body) = Context.Monad.of_engine (EC.Monad.to_mut (EC.find_const c)) in
+    (match body with
+    | None -> fun (ctx, _) -> raise (E.TypeError (ctx, E.NoBody (E.mkConst c [] [])))
+    | Some t ->
+    let+ t = Context.Monad.of_engine (EC.Monad.to_mut (E.print (E.of_kernel t))) in
+    print_endline (c + "@{" + String.concat ", " (List.init (IMap.cardinal univ.sorts) (fun i -> "s_" + string_of_int i)) + "; " + String.concat ", " (List.init (IMap.cardinal univ.levels - 1) (fun i -> "u_" + string_of_int Int.(i + 1))) + "} := " + t))
+  | Check t ->
+    let* t = Context.Monad.of_engine (PC.Monad.to_engine (P.elaborate t)) in
+    let* ty = Context.Monad.of_engine (E.typecheck t) in
+    let* t = Context.Monad.of_engine (EC.Monad.to_mut (E.print t)) in
+    let+ ty = Context.Monad.of_engine (EC.Monad.to_mut (E.print ty)) in
+    print_endline (t + " : " + ty)
+  | Define (v, su, ty, t) ->
+    let** () = fun ctx -> let () = assert (IMap.cardinal (fst ctx).E.var = 0) in match snd ctx with | Idle -> () | Proofmode (_, _, _, _) -> raise (Error (ctx, OpenGoals)) in
+    let (s, u) = Option.value ~default:([], []) su in
+    let* sort = Context.Monad.of_engine (EC.Monad.List.fold_left (fun vs ss ctx -> let ctx, s = EC.new_sort (Some vs) ctx in ctx, SMap.add vs s ss) s SMap.empty) in
+    let* univ = Context.Monad.of_engine (EC.Monad.List.fold_left (fun vu us ctx -> let ctx, u = EC.new_level (Some vu) ctx in ctx, SMap.add vu u us) u SMap.empty) in
+    let** pctx = fun (ctx, _) -> P.Context.{ var = SMap.empty; sort; univ; evar = SMap.empty; ctx } in
+    let pctx, ty = P.elaborate ty pctx in
+    let pctx, t = P.elaborate t pctx in
+    let* () = fun (_, status) -> (pctx.ctx, status), () in
+    let* tyb = Context.Monad.of_engine (E.typecheck t) in
+    let* b = Context.Monad.of_engine (E.unify tyb ty) in
+    if not b then fun (ctx, _) -> raise (E.TypeError (ctx, E.TypeMismatch (ty, t))) else
+    let* gs = Context.Monad.of_engine (EC.Monad.to_mut (Goal.collect_goals t)) in
+    fun (ctx, _) -> (if gs = [] then (let ctx, () = EC.push_const v (ty, Some t) ctx in EC.reset ctx), Idle else (ctx, Proofmode (v, ty, t, gs))), ()
+  | Tac tac ->
+    let* goal = fun (ctx, status) ->
+      let status, g = match status with | Proofmode (v, ty, t, g :: gs) -> Proofmode (v, ty, t, gs), g | _ -> raise (Error ((ctx, status), NoGoal)) in
+      (ctx, status), g in
+    let* subgoals = Context.Monad.of_engine (Tactic.exec tac goal) in
+    fun (ctx, status) ->
+      let status = match status with | Idle -> failwith "unreachable" | Proofmode (v, ty, t, gs) ->
+        let gs = List.filter (fun g -> let t = EC.get_evar_body g.Goal.goal ctx in t = None) (subgoals @ gs) in
+        Proofmode (v, ty, t, gs) in
+      (ctx, status), ()
+  | Qed transparent -> fun (ctx, status) -> 
+    (match status with | Idle -> raise (Error ((ctx, status), NoGoal)) | Proofmode (_, _, _, _ :: _) -> raise (Error ((ctx, status), OpenGoals)) | Proofmode (v, ty, t, []) ->
+    let ctx, () = EC.push_const v (ty, if transparent then Some t else None) ctx in
+    (EC.reset ctx, Idle), ())
+  | Whd t ->
+    let** ctx = fun (ctx, _) -> ctx in
+    let* t = Context.Monad.of_engine (PC.Monad.to_engine (P.elaborate t)) in
+    let* t' = Context.Monad.of_engine (EC.Monad.to_mut (E.whd t)) in
+    let* t = Context.Monad.of_engine (EC.Monad.to_mut (E.print t)) in
+    let* t' = Context.Monad.of_engine (EC.Monad.to_mut (E.print t')) in
+    let () = print_endline ("whd " + t + " := " + t') in
+    (* Do not forget to restore the context. *)
+    fun (_, status) -> (ctx, status), ()
+  | Eval t ->
+    let** ctx = fun (ctx, _) -> ctx in
+    let* t = Context.Monad.of_engine (PC.Monad.to_engine (P.elaborate t)) in
+    let* t' = Context.Monad.of_engine (EC.Monad.to_mut (E.eval t)) in
+    let* t = Context.Monad.of_engine (EC.Monad.to_mut (E.print t)) in
+    let* t' = Context.Monad.of_engine (EC.Monad.to_mut (E.print t')) in
+    let () = print_endline ("eval " + t + " := " + t') in
+    (* Do not forget to restore the context. *)
+    fun (_, status) -> (ctx, status), ()
+  | Skip -> ret ()
+  | Stop -> fun (ctx, status) ->
+    let () = match status with
+      | Proofmode (_, _, _, g :: _) -> print_endline (Goal.print g ctx)
+      | _ -> () in
+    raise (Error ((ctx, status), Stop))
+
+let print_error e _ctx =
+  match e with
+  | Stop -> "Stop"
+  | NoGoal -> "No open goal"
+  | OpenGoals -> "Open goal(s) remaining"

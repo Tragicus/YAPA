@@ -1,8 +1,10 @@
 (lang dune 3.17)
 
-(name YAPA)
+(name yapa)
 
 (generate_opam_files true)
+
+(map_workspace_root false)
 
 (source
  (github username/reponame))
@@ -18,7 +20,7 @@
 (using menhir 3.0)
 
 (package
- (name YAPA)
+ (name yapa)
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends ocaml)
