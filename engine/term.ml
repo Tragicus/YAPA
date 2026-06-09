@@ -722,6 +722,7 @@ and fold_left_args_with_type args ty f acc =
 and instantiate_evar { hd = ev; args } t =
   (*let () = print_endline ("instantiate_evar") in*)
   let ret = Context_.Monad.ret in
+  let iret = Context_.Monad.iret in
 
   let i = destEvar (of_hd ev) in
   let** (ity, ibody, icstrs) = Context_.find_evar i in
@@ -740,84 +741,30 @@ and instantiate_evar { hd = ev; args } t =
     ) (List.mapi (fun i arg -> (i, arg)) (List.rev args)) IMap.empty in
 
   let t' = t in
-  let rec compile k t = 
-    let* hd = match t.hd with
-    | Var i when k <= i ->
-      (match IMap.find_opt (i - k) map with
-      | None -> ret None
-      | Some None -> fun ctx -> raise (TypeError (ctx, HO ({ hd = ev; args }, t')))
-      | Some (Some i) -> ret (Some (Var (i + k))))
-    | Const (_, _, _) | Type _ | Var _ -> ret (Some t.hd)
-    | Evar j -> ret (if j = i then None else Some t.hd)
-    | Fun (f, tele, body) ->
-      Context_.fold_telescope ~avoid_capture:false (fun telek (v, ty, t) ->
-        match telek with | None -> ret None | Some (tele, k) ->
-        Context_.Monad.Option.bind (compile k ty) (fun ty ->
-        let+ t = Context_.Monad.Option.map (compile k) t in
-        Option.map (fun t -> (v, ty, t) :: tele, k + 1) (Option.swap t))
-      ) (Some ([], k)) tele (fun telek ->
-          match telek with | None -> ret None | Some (tele, k) ->
-          let+ body = compile k body in
-          Option.map (fun body -> Fun (f, List.rev tele, body)) body)
-    | Ind (v, a, c) ->
-      Context_.Monad.Option.bind (compile k a) (fun a ->
-      let k = k + 1 in
-      let+ c = Context_.Monad.List.map (compile k) c in
-      let c = List.fold_left (fun cs c -> match cs, c with | Some cs, Some c -> Some (c :: cs) | _, _ -> None) (Some []) c in
-      Option.map (fun c -> Ind (v, a, List.rev c)) c)
-    | Construct (ind, i) ->
-      Context_.Monad.Option.bind (compile k ind) (fun ind -> ret (Some (Construct (ind, i))))
-    | Case (ind, r) ->
-      Context_.Monad.Option.bind (compile k ind) (fun ind -> ret (Some (Case (ind, r)))) in
-    let* ct = Context_.Monad.Option.bind (ret hd) (fun hd ->
-      let+ args = Context_.Monad.List.map (compile k) t.args in
-      let args = List.fold_left (fun args arg -> match args, arg with | Some args, Some arg -> Some (arg :: args) | _, _ -> None) (Some []) (List.rev args) in
-      Option.map (fun args -> { hd; args }) args) in
-    match ct with
-    | Some _ -> ret ct
-    | None ->
-    let** t' = whd_opt ~flags:{ whd_flags_none with beta = true; steps = Some 1 } t in
-    match t' with
-    | Some t -> compile k t
-    | None ->
+  let** d = Context_.depth in
+  (* Getting rid of the variables that are not in `args`. *)
+  let* t = rm_problematic_term (fun t ->
+    let** d' = Context_.depth in
     match t.hd with
-    | Evar j when j <> i -> 
-      let* args = Context_.Monad.List.map (compile k) args in
-      let** ty = Context_.get_evar_type j in
-      let* (tele, ty) = destArity ~until:(Exact (List.length args)) ty in
-
-      (* TOTHINK: Should I add something to disallow using some variables for instantiation, rather than removing them from the telescope altogether? *)
-      let argsl = Dynarray.create () in
-      let subst k =
-        let n = Dynarray.length argsl in
-        subst (fun i -> if n <= i then mkVar (i - k) else
-          match Dynarray.get argsl i with
-          | Some j -> mkVar (i + j - k)
-          | None -> raise Not_found
-        ) in
-      let rec purge_none k acctele accargs tele args =
-        match tele, args with
-        | [], [] -> (k, acctele, accargs)
-        | ((v, ty, None) as b) :: tele, (Some arg) :: args ->
-          if k = 0 then purge_none k (b :: acctele) (arg :: accargs) tele args else
-          let b = (v, subst k ty, None) in
-          let arg = subst k arg in
-          let () = Dynarray.add_last argsl (Some k) in
-          purge_none k (b :: acctele) (arg :: accargs) tele args
-        | _ :: tele, None :: args ->
-          let () = Dynarray.add_last argsl None in
-          purge_none (k + 1) acctele accargs tele args
-        | _, _ -> failwith "unreachable" in
-      (try let (k, tele, args) = purge_none 0 [] [] tele args in
-        let ty = subst k ty in
-        let+ ev = Context_.new_evar ~ty:(Some (of_hd (Fun (true, List.rev tele, ty)))) ~with_ctx:false in
-        Some { hd = Evar (destEvar ev); args = List.rev args }
-      with Not_found -> ret None)
-    | _ -> ret ct in
-  let* t = compile 0 t in
+    | Var v when d' <= v -> fun ctx -> raise (TypeError (ctx, UnboundVar (v - d')))
+    | Var v when d' - d <= v -> iret (Option.is_none (IMap.find_opt (v - (d' - d)) map))
+    | _ -> iret false
+  ) t in
   match t with
   | None -> fun ctx -> raise (TypeError (ctx, OccurCheck ({ hd = ev; args }, t')))
   | Some t ->
+  (* Getting rid of the variables that cause the instantiation to be higher-order. *)
+  let* t = rm_problematic_term (fun t ->
+    let** d' = Context_.depth in
+    match t.hd with
+    | Var v when d' <= v -> failwith "unreachable"
+    | Var v when d' - d <= v -> iret (Option.is_none (IMap.find (v - (d' - d)) map))
+    | _ -> iret false
+  ) t in
+  match t with
+  | None -> fun ctx -> raise (TypeError (ctx, HO ({ hd = ev; args }, t')))
+  | Some t ->
+  let t = subst (fun i -> mkVar (Option.get (IMap.find i map))) t in
   let** ty = Context_.get_evar_type i in
   let* (tele, _) = destArity ~whd_rty:false ~until:(Exact (List.length args)) ty in fun ctx ->
   let ctx = { ctx with evar = IMap.update i (fun _ -> Some (ity, Some (mkFun tele t), [])) ctx.evar } in
@@ -1258,16 +1205,18 @@ and rm_problematic_term pb t =
 
 and prune_evar args ev =
 (*   let () = print_endline ("prune_evar " ^ ISet.print args) in *)
+  let** d' = Context_.depth in
   if ISet.is_empty args then Context_.Monad.ret (mkEvar ev) else
   let largs = Dynarray.create () in
   let compile k t ctx =
     let n = Dynarray.length largs in
+    let d' = d' + n in
     let ctx, t' = rm_problematic_term (fun t ->
       let+* d = Context_.depth in
       match t.hd with
       | Var v when d <= v -> raise (TypeError (ctx, UnboundVar (v - d)))
-      | Var v when d - n <= v ->
-        Option.is_none (Dynarray.get largs (n - (v - (d - n)) - 1))
+      | Var v when d - d' <= v ->
+        Option.is_none (Dynarray.get largs (n - (v - (d - d')) - 1))
       | _ -> false
     ) t ctx in
     let t = Option.value ~default:t t' in
@@ -1282,11 +1231,11 @@ and prune_evar args ev =
   let* (tele, ty) = destArity ~keep_let:true ~until:(Exact (k + 1)) ty in
   let rec loop rtele rargs k = function | [] -> let+ ty = compile k ty in rtele, rargs, ty | (v, ty, t) :: tele ->
     let n = Dynarray.length largs in
-    if ISet.mem n args then let () = Dynarray.add_last largs None in loop rtele rargs k tele else
+    if ISet.mem n args then let () = Dynarray.add_last largs None in Context_.with_var (v, ty, t) (loop rtele rargs k tele) else
     let* ty = compile k ty in
     let* t = Context_.Monad.Option.map (fun t -> compile k t) t in
     let () = Dynarray.add_last largs (Some k) in
-    loop ((v, ty, t) :: rtele) (n :: rargs) (k + 1) tele in
+    Context_.with_var (v, ty, t) (loop ((v, ty, t) :: rtele) (n :: rargs) (k + 1) tele) in
   let* (rtele, rargs, ty) = loop [] [] 0 tele in
 
   let tele = List.rev rtele in

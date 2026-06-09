@@ -29,8 +29,9 @@ let print ?(debug=false) g ctx =
     ) [] g.ctx (fun tele ->
       let** g = target g in
       let* ty = E.typecheck g in
+      let** g = E.print ~debug g in
       let** ty = E.print ~debug ty in
-      EC.Monad.ret (String.concat "\n" (List.rev tele @ ["\n==========================\n"; ty]) + "\n")
+      EC.Monad.ret (String.concat "\n" (List.rev tele @ ["\n==========================\n"; g ^ " : " ^ ty]) + "\n")
     )) { ctx with var = IMap.empty }
 
 let collect_goals t =
@@ -39,6 +40,8 @@ let collect_goals t =
     let** t = E.whd ~flags:E.whd_flags_none t in
     let** hd = match t.E.hd with
       | Evar i when not (ISet.mem i ids) ->
+        let** body = EC.get_evar_body i in
+        if body <> None then EC.Monad.iret ([], ids) else
         let** d = EC.depth in
         let d = d - 1 in
         let rec process_args k = function | [] -> k | arg :: args ->
