@@ -4,10 +4,11 @@ module EC = E.Context
 
 type univ = int SMap.t
 
-type 'a binder = string * 'a * 'a option
+type 'a binder = string * 'a * 'a option * bool (* implicit *)
 type 'a telescope = 'a binder list
 type 'a arity = 'a telescope * 'a
 
+(* We do not follow the convention from the kernel and the engine because we want to clear implicits on an arbitrary term, e.g. as in `@(f x) y`. *)
 type 'a head =
   | Const of string * (string list * univ list) option
   | Fun of bool (* true if forall *) * 'a telescope * 'a
@@ -20,84 +21,95 @@ type 'a head =
             (* return type *) 'a * 
             (* branches *) ('a * 'a) list
   | Evar of string
+  | App of term list
 
-type term = { hd: term head; args: term list }
+and term = { hd: term head; implicits: bool }
 type t = term
 
-let of_hd hd = { hd; args = [] }
-let mkConst c su = { hd = Const (c, su); args = [] }
+let of_hd hd = { hd; implicits = true }
+let clear_implicits t = { t with implicits = false }
+let mkConst c su = of_hd (Const (c, su))
 let mkVar v = mkConst v None
 let mkForallOrFun forall tele t =
-  if List.is_empty tele then t else
-  { hd = (match t.hd with
-    | Fun (forall', tele', body) when forall' = forall && List.is_empty t.args ->
+  clear_implicits (if List.is_empty tele then t else
+    of_hd (match t.hd with
+    | Fun (forall', tele', body) when forall' = forall ->
         Fun (forall, tele @ tele', body)
-    | _ -> Fun (forall, tele, t));
-  args = [] }
+    | _ -> Fun (forall, tele, t)))
 let mkForall = mkForallOrFun true
 let mkFun = mkForallOrFun false
-let mkLet ?(forall=false) x ty t = mkForallOrFun forall [(x, ty, Some t)]
-let mkType s u = { hd = Type (s, u); args = [] }
-let mkInd v a c = { hd = Ind (v, a, c); args = [] }
-let mkConstruct t i = { hd = Construct (t, i); args = [] }
-let mkCase r s ind ty b = { hd = Case (r, s, ind, ty, b); args = [] }
-let mkApp args t = { hd = t.hd; args = t.args @ args }
+let mkLet ?(forall=false) x ty t = mkForallOrFun forall [(x, ty, Some t, false)]
+let mkType s u = of_hd (Type (s, u))
+let mkInd v a c = of_hd (Ind (v, a, c))
+let mkConstruct t i = of_hd (Construct (t, i))
+let mkCase r s ind ty b = of_hd (Case (r, s, ind, ty, b))
+let mkApp args t = if args = [] then t else { hd = App (t :: args); implicits = true }
 
 let destVar t =
   match t.hd with
-  | Const (v, None) when List.is_empty t.args -> v
+  | Const (v, None) -> v
   | _ -> raise Not_found
 
 let destConst t =
   match t.hd with
-  | Const (c, su) when List.is_empty t.args -> (c, su)
+  | Const (c, su) -> (c, su)
   | _ -> raise Not_found
 
 let destFun t =
   let rec extract tele = function
-    | ((_, _, None) as b) :: rest -> extract (b :: tele) rest
+    | ((_, _, None, _) as b) :: rest -> extract (b :: tele) rest
     | rest -> List.rev tele, rest in
   match t.hd with
-  | Fun (false, tele, body) when List.is_empty t.args ->
+  | Fun (false, tele, body) ->
       let tele, rest = extract [] tele in
       (tele, mkFun rest body)
   | _ -> ([], t)
 
 let destType t =
   match t.hd with
-  | Type (s, u) (* Assuming t is well-typed, t.args is empty *) -> (s, u)
+  | Type (s, u) -> (s, u)
   | _ -> raise Not_found
 
 let destForall t =
   match t.hd with
-  | Fun (true, ((_, _, None) as b) :: tele, body) when List.is_empty t.args ->
+  | Fun (true, ((_, _, None, _) as b) :: tele, body) ->
       (b, mkForall tele body)
   | _ -> raise Not_found
 
 let destLet t =
   match t.hd with
-  | Fun (forall, ((x, ty, Some t) :: tele), body) when List.is_empty t.args -> (x, ty, t, mkForallOrFun forall tele body)
+  | Fun (forall, ((x, ty, Some t, _) :: tele), body) -> (x, ty, t, mkForallOrFun forall tele body)
   | _ -> raise Not_found
 
 let destInd t =
   match t.hd with
-  | Ind (v, a, c) (* Assuming t is well-typed, t.args is empty *) -> (v, a, c)
+  | Ind (v, a, c) -> (v, a, c)
   | _ -> raise Not_found
 
 let destConstruct t =
   match t.hd with
-  | Construct (ind, i) when List.is_empty t.args -> (ind, i)
+  | Construct (ind, i) -> (ind, i)
   | _ -> raise Not_found
 
 let destCase t =
   match t.hd with
-  | Case (r, s, ind, ty, b) when List.is_empty t.args -> (r, s, ind, ty, b)
+  | Case (r, s, ind, ty, b) -> (r, s, ind, ty, b)
   | _ -> raise Not_found
 
 let destEvar t =
   match t.hd with
-  | Evar i when List.is_empty t.args -> i
+  | Evar i -> i
   | _ -> raise Not_found
+
+let destApp t = 
+  match t.hd with
+  | App (t :: args) -> (t, args)
+  | _ -> raise Not_found
+
+let safe_dest_app t =
+  match t.hd with
+  | App (t :: args) -> (t, args)
+  | _ -> (t, [])
 
 module Context = struct
   type t = {
@@ -109,13 +121,13 @@ module Context = struct
   }
 
   (* TOTHINK: Should I translate more things? *)
-  let of_engine ctx = { var = IMap.fold (fun i (v, _, _) -> SMap.update v (fun l -> Some (i :: Option.value ~default:[] l))) ctx.E.var SMap.empty; sort = SMap.empty; univ = SMap.empty; evar = SMap.empty; ctx }
+  let of_engine ctx = { var = IMap.fold (fun i (v, _, _, _) -> SMap.update v (fun l -> Some (i :: Option.value ~default:[] l))) ctx.E.var SMap.empty; sort = SMap.empty; univ = SMap.empty; evar = SMap.empty; ctx }
   let empty = of_engine EC.empty
 
-  let push_var ?(avoid_capture=true) (v, ty, body) ctx =
+  let push_var ?(avoid_capture=true) (v, ty, body, impl) ctx =
     let d = IMap.cardinal ctx.ctx.E.var in
     let v = if avoid_capture then Utils.fresh_name v (List.map fst (SMap.to_list ctx.var)) else v in
-    let ectx, _ = EC.push_var ~avoid_capture:false (v, ty, body) ctx.ctx in
+    let ectx, _ = EC.push_var ~avoid_capture:false (v, ty, body, impl) ctx.ctx in
     { ctx with var = SMap.update v (fun l -> Some (d :: Option.value ~default:[] l)) ctx.var; ctx = ectx }, ()
 
   let pop_var ctx =
@@ -171,19 +183,17 @@ let print_univ l =
 let print t =
   let (+) = String.cat in
   let rec aux t = 
-    let s = match t.hd with
-      | Const (c, su) -> c + (match su with | None -> "" | Some (s, u) -> "@{" + String.concat ", " s + "; " + String.concat ", " (List.map print_univ u)), true
-      | Type (s, u) -> (if (s = "_" || s = "Type" || s = "Prop" || s = "SProp") && SMap.mem "_" u && SMap.find "_" u = 0
-        then match s with | "_" -> "Type" | _ -> s
-        else "Type@{" + s + "; " + print_univ u), true
-      | Fun (f, tele, t) -> ((if f then "forall " else "fun ") + String.concat " " (List.map (fun (v, ty, t) -> "(" + v + " : " + fst (aux ty) + (match t with | None -> "" | Some t -> " := " + fst (aux t)) + ")") tele) + (if f then ", " else " => ") + fst (aux t)), false
-      | Ind (v, a, c) -> "ind " + v +  " : " + fst (aux a) + " :=" + " | " + String.concat " | " (List.map (fun t -> fst (aux t)) c), false
-      | Construct (ind, id) -> "ind.mk(" + fst (aux ind) + ")." + string_of_int id, true
-      | Case (r, s, ind, ty, b) -> "match " + (if r then "rec " else "") + fst (aux s) + (match ind with | None -> " " | Some ind -> "as " + fst (aux ind)) + " return " + fst (aux ty) + " with " + String.concat " " (List.map (fun (l, r) -> "| " + fst (aux l) + " => " + fst (aux r)) b), false
-      | Evar v -> (if v = "_" then "?" else ("?" + v)), true in
-    match t.args with
-    | [] -> s
-    | args -> String.concat " " (List.map (fun (t, atomic) -> if atomic then t else "(" + t + ")") (s :: (List.map aux args))), false in
+    match t.hd with
+    | Const (c, su) -> c + (match su with | None -> "" | Some (s, u) -> "@{" + String.concat ", " s + "; " + String.concat ", " (List.map print_univ u)), true
+    | Type (s, u) -> (if (s = "_" || s = "Type" || s = "Prop" || s = "SProp") && SMap.mem "_" u && SMap.find "_" u = 0
+      then match s with | "_" -> "Type" | _ -> s
+      else "Type@{" + s + "; " + print_univ u), true
+    | Fun (f, tele, t) -> ((if f then "forall " else "fun ") + String.concat " " (List.map (fun (v, ty, t, impl) -> (if impl then "{" else "(") + v + " : " + fst (aux ty) + (match t with | None -> "" | Some t -> " := " + fst (aux t)) + (if impl then "}" else ")")) tele) + (if f then ", " else " => ") + fst (aux t)), false
+    | Ind (v, a, c) -> "ind " + v +  " : " + fst (aux a) + " :=" + " | " + String.concat " | " (List.map (fun t -> fst (aux t)) c), false
+    | Construct (ind, id) -> "ind.mk(" + fst (aux ind) + ")." + string_of_int id, true
+    | Case (r, s, ind, ty, b) -> "match " + (if r then "rec " else "") + fst (aux s) + (match ind with | None -> " " | Some ind -> "as " + fst (aux ind)) + " return " + fst (aux ty) + " with " + String.concat " " (List.map (fun (l, r) -> "| " + fst (aux l) + " => " + fst (aux r)) b), false
+    | Evar v -> (if v = "_" then "?" else ("?" + v)), true
+    | App _ -> let (t, args) = destApp t in fst (aux t) + " " + String.concat " " (List.map (fun (t, atomic) -> if atomic then t else "(" + t + ")") (List.map aux args)), false in
   fst (aux t)
 
 type error =
@@ -197,7 +207,6 @@ type error =
   | MissingBranch of int
 
 exception Error of Context.t * error
-
 
 let rec elaborate (t : t) =
   let ret = Context.Monad.ret in
@@ -214,7 +223,9 @@ let rec elaborate (t : t) =
     else
       let ctx, u = Context.Monad.List.map (fun (u, i) ctx -> ctx, try Kernel.Univ.Level.add i (SMap.find u ctx.univ) with _ -> raise (Error (ctx, UnboundUniv u))) (SMap.to_list u) ctx in
       ctx, List.fold_left Kernel.Univ.Level.max Kernel.Univ.Level.base u in
-  let* hd = match t.hd with
+  let hd, args = safe_dest_app t in
+  let impl = hd.implicits && t.implicits in
+  let* hd = match hd.hd with
     | Type (s, u) -> let* s = sort s in let+ u = univ u in E.of_hd (E.Type (s, u))
     | Const (c, su) ->
       let** v = fun ctx -> SMap.find_opt c ctx.Context.var in
@@ -233,17 +244,17 @@ let rec elaborate (t : t) =
     | Fun (f, tele, body) -> fun ctx ->
       let rec telescope rtele = function
         | [] -> let+ body = elaborate body in rtele, body 
-        | (v, ty, t) :: tele ->
+        | (v, ty, t, impl) :: tele ->
           let* ty = elaborate ty in
           let* t = Context.Monad.Option.map elaborate t in
-          let* () = Context.push_var ~avoid_capture:false (v, ty, t) in
-          telescope ((v, ty, t) :: rtele) tele in
+          let* () = Context.push_var ~avoid_capture:false (v, ty, t, impl) in
+          telescope ((v, ty, t, impl) :: rtele) tele in
       let (ctx', (rtele, body)) = telescope [] tele ctx in
       let ctx' = { ctx' with var = ctx.var; ctx = { ctx'.ctx with var = ctx.ctx.var } } in
       ctx', E.of_hd (E.Fun (f, List.rev rtele, body))
     | Ind (v, a, c) ->
       let* a = elaborate a in
-      let+ c = Context.with_var ~avoid_capture:false (v, a, None) (Context.Monad.List.map elaborate c) in
+      let+ c = Context.with_var ~avoid_capture:false (v, a, None, false) (Context.Monad.List.map elaborate c) in
       E.of_hd (E.Ind (v, a, c))
     | Construct (ind, i) -> let+ ind = elaborate ind in E.of_hd (E.Construct (ind, i))
     | Case (r, s, ind, rty, br) ->
@@ -253,22 +264,23 @@ let rec elaborate (t : t) =
       let* whind = Context.Monad.of_engine (EC.Monad.to_mut (E.whd ind)) in
       let* (_, a, cs) = Context.Monad.of_engine (fun ctx -> try ctx, E.destInd (E.of_hd whind.hd) with Not_found -> raise (E.TypeError (ctx, E.IllFormed ind))) in
 
-      let* () = Context.push_var ~avoid_capture:false ("_", a, Some ind) in
+      let* () = Context.push_var ~avoid_capture:false ("_", a, Some ind, false) in
       let* br = Context.Monad.List.map (fun (c, r) ->
-        let* chd = elaborate (of_hd (c.hd)) in
+        let (c, cargs) = safe_dest_app c in
+        let* chd = elaborate c in
         let* chd = Context.Monad.of_engine (EC.Monad.to_mut (E.whd chd)) in
         let** (ind', i) = fun ctx -> try E.destConstruct chd with _ -> let () = print_endline ("not a constructor: " ^ E.print chd ctx.Context.ctx) in raise (Error (ctx, IllegalBranch (c, r))) in
         let* b = Context.Monad.of_engine (E.unify (E.bump 1 ind) ind') in
         if not b then fun ctx -> let () = print_endline "wrong inductive" in raise (Error (ctx, IllegalBranch (c, r))) else
         let cty = List.nth cs i in
-        let** () = fun ctx -> print_endline ("cty is " ^ E.print ~debug:true cty ctx.Context.ctx) in
         let* ctele, _ = Context.Monad.of_engine (E.destArity cty) in
-        if List.length ctele <> List.length c.args then fun ctx -> let () = print_endline "wrong number of arguments" in raise (Error (ctx, IllegalBranch (c, r))) else
-        let* tele = Context.Monad.List.map (fun (v, (_, ty, t)) ctx ->
+        if List.length (List.filter (fun (_, _, t, impl) -> t = None && not (c.implicits && impl)) ctele) <> List.length cargs then fun ctx ->
+          let () = print_endline "wrong number of arguments" in raise (Error (ctx, IllegalBranch (c, r))) else
+        let* tele = Context.Monad.List.map (fun (v, (_, ty, t, impl)) ctx ->
           let (v, su) = try destConst v with _ -> let () = print_endline "argument should be a variable" in raise (Error (ctx, IllegalBranch (c, r))) in
           if su <> None then let () = print_endline "argument should not be a constant" in raise (Error (ctx, IllegalBranch (c, r))) else
-          ctx, (v, ty, t)) (List.combine c.args ctele) in
-        let* _ = Context.Monad.List.fold_left (fun (v, _, _) vs ctx -> if SSet.mem v vs then let () = print_endline "variable bound several times" in raise (Error (ctx, IllegalBranch (c, r))) else ctx, SSet.add v vs) tele SSet.empty in
+          ctx, (v, ty, t, impl)) (List.combine cargs ctele) in
+        let* _ = Context.Monad.List.fold_left (fun (v, _, _, _) vs ctx -> if SSet.mem v vs then let () = print_endline "variable bound several times" in raise (Error (ctx, IllegalBranch (c, r))) else ctx, SSet.add v vs) tele SSet.empty in
         let* r = Context.with_telescope ~avoid_capture:false tele (elaborate r) in
         let r = E.beta ind (E.mkFun tele r) in
         Context.Monad.ret (i, r)
@@ -280,12 +292,32 @@ let rec elaborate (t : t) =
       E.{hd = E.Case (ind, r); args = rty :: br @ [s] }
     | Evar s ->
         if s = "_" then Context.Monad.of_engine (EC.new_evar ~with_ctx:true) else
-        fun ctx -> try ctx, E.of_hd (E.Evar (SMap.find s ctx.evar)) with _ ->
+        (fun ctx -> try ctx, E.of_hd (E.Evar (SMap.find s ctx.evar)) with _ ->
           let ctx, t = Context.Monad.of_engine (EC.new_evar ~with_ctx:true) ctx in
           let i = E.destEvar (E.of_hd t.hd) in
-          { ctx with evar = SMap.add s i ctx.evar }, t in
-  let* args = Context.Monad.List.map elaborate t.args in
-  Context.Monad.ret (E.mkApp args hd)
+          { ctx with evar = SMap.add s i ctx.evar }, t)
+    | App _ -> elaborate hd in
+  let* args = Context.Monad.List.map elaborate args in
+  if not impl then Context.Monad.ret (E.mkApp args hd) else
+  let* ty = Context.Monad.of_engine (E.typecheck hd) in
+  let* tele, _ = Context.Monad.of_engine (E.destArity ~until:(Exact (List.length args)) ~count_implicits:false ty) in
+
+  let args' = Dynarray.create () in
+  let subst t =
+    let n = Dynarray.length args' in
+    if n = 0 then t else E.subst (fun i -> if i < n then Dynarray.get args' (n - i - 1) else E.mkVar (i - n)) t in
+  (* This is a specialized copy of `Engine.Term.fold_left_args_with_type`, because the arguments do not align with the telescope as the latter assumes. *)
+
+  let rec loop rargs args tele =
+    let open EC.Monad.Notations in
+    let ret = EC.Monad.ret in
+    match tele with | [] -> ret rargs | (_, ty, _, impl) :: tele ->
+    let* arg = if impl then EC.new_evar ~ty:(Some (subst ty)) ~with_ctx:true else ret (List.hd args) in
+    let args = if impl then args else List.tl args in
+    let () = Dynarray.add_last args' arg in
+    loop (arg :: rargs) args tele in
+  let+ rargs = Context.Monad.of_engine (loop [] args tele) in
+  E.mkApp (List.rev rargs) hd
 
 let print_error e =
   let (+) = String.cat in

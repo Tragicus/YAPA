@@ -9,6 +9,7 @@
 %token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION
 %token QED DEFINED
 
+%nonassoc AT
 %nonassoc COMMA
 %nonassoc ARROW
 %nonassoc IN
@@ -74,15 +75,17 @@ match_return:
 term:
   | FUN; telescope; ARROW; term { Term.mkFun $2 $4 }
   | FORALL; telescope; COMMA; term { Term.mkForall $2 $4 }
-  | LET; VAR; COLON; term; COLONEQ; term; IN; term { Term.mkFun [($2, $4, Some $6)] $8 }
+  | LET; VAR; COLON; term; COLONEQ; term; IN; term { Term.mkFun [($2, $4, Some $6, false)] $8 }
   | IND; VAR; option(type_annotation); constructors; END { Term.mkInd $2 (Option.value ~default:(Term.of_hd (Term.Evar "_")) $3) $4 }
   | MATCH; option(REC); term; option(type_annotation); option(match_return); WITH; list(preceded(PIPE, branch)); END { Term.mkCase ($2 <> None) $3 $4 (Option.value ~default:(Term.of_hd (Term.Evar "_")) $5) $7 }
-  | term; TARROW; term { Term.mkForall [("_", $1, None)] $3 }
+  | AT; term { Term.clear_implicits $2 }
+  | term; TARROW; term { Term.mkForall [("_", $1, None, false)] $3 }
   | app { $1 }
 
 telescope_elem:
-  | LPAR; nonempty_list(VAR); COLON; term; RPAR { List.map (fun x -> (x, $4, None)) $2 }
-  | VAR { [$1, Term.of_hd (Term.Evar " "), None] }
+  | LPAR; nonempty_list(VAR); option(type_annotation); RPAR { let ty = Option.value ~default:(Term.of_hd(Term.Evar "_")) $3 in List.map (fun x -> (x, ty, None, false)) $2 }
+  | LCBRACE; nonempty_list(VAR); option(type_annotation); RCBRACE { let ty = Option.value ~default:(Term.of_hd(Term.Evar "_")) $3 in List.map (fun x -> (x, ty, None, true)) $2 }
+  | VAR { [$1, Term.of_hd (Term.Evar "_"), None, false] }
 
 %inline
 telescope:

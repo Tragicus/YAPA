@@ -22,7 +22,7 @@ let enter g f ctx =
 
 let print ?(debug=false) g ctx =
   let (+) = String.cat in
-  EC.Monad.to_imut (EC.fold_telescope ~avoid_capture:false (* Captures are anomalies *) (fun tele (v, ty, t) ->
+  EC.Monad.to_imut (EC.fold_telescope ~avoid_capture:false (* Captures are anomalies *) (fun tele (v, ty, t, _) ->
       let** ty = E.print ~debug ty in
       let+ t = EC.Monad.Option.map (fun t -> EC.Monad.to_mut (E.print ~debug t)) t in
       (v + " : " + ty + (match t with | None -> "" | Some t -> " := " + t)) :: tele
@@ -52,7 +52,7 @@ let collect_goals t =
         let ids = ISet.add i ids in
         fun ctx -> [{ ctx = List.take (d - k) (List.map snd (IMap.to_list ctx.var)); goal = i }], ids
       | Fun (_, tele, body) ->
-        EC.Monad.to_imut (EC.fold_telescope (fun (gs, ids) (_, ty, t) ->
+        EC.Monad.to_imut (EC.fold_telescope (fun (gs, ids) (_, ty, t, _) ->
           let** ty, ids = aux ids ty in
           let gs = ty @ gs in
           let+ t = EC.Monad.Option.map (fun t -> EC.Monad.to_mut (aux ids t)) t in
@@ -62,7 +62,7 @@ let collect_goals t =
           EC.Monad.ret (body @ gs, ids)))
       | Ind (v, a, c) ->
         let** a' = aux ids a in
-        EC.Monad.to_imut (EC.with_var (v, a, None) (EC.Monad.List.fold_left (fun t (gs, ids) ctx -> let (t, ids) = aux ids t ctx in ctx, (t @ gs, ids)) c a'))
+        EC.Monad.to_imut (EC.with_var (v, a, None, false) (EC.Monad.List.fold_left (fun t (gs, ids) ctx -> let (t, ids) = aux ids t ctx in ctx, (t @ gs, ids)) c a'))
       | Construct (ind, _) | Case (ind, _) -> aux ids ind
       | _ -> EC.Monad.iret ([], ISet.empty) in
     EC.Monad.to_imut (EC.Monad.List.fold_left (fun t (gs, ids) ctx -> let (t, ids) = aux ids t ctx in ctx, (t @ gs, ids)) t.args hd) in

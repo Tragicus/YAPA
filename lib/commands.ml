@@ -78,8 +78,8 @@ let eval cmd : unit Context.Monad.t =
   | Check t ->
     let* t = Context.Monad.of_engine (PC.Monad.to_engine (P.elaborate t)) in
     let* ty = Context.Monad.of_engine (E.typecheck t) in
-    let* t = Context.Monad.of_engine (EC.Monad.to_mut (E.print t)) in
-    let+ ty = Context.Monad.of_engine (EC.Monad.to_mut (E.print ty)) in
+    let* t = Context.Monad.of_engine (EC.Monad.to_mut (E.print ~keep_evars:false t)) in
+    let+ ty = Context.Monad.of_engine (EC.Monad.to_mut (E.print ~keep_evars:false ty)) in
     print_endline (t + " : " + ty)
   | Define (v, su, ty, t) ->
     let** () = fun ctx -> let () = assert (IMap.cardinal (fst ctx).E.var = 0) in match snd ctx with | Idle -> () | Proofmode (_, _, _, _) -> raise (Error (ctx, OpenGoals)) in
@@ -132,6 +132,7 @@ let eval cmd : unit Context.Monad.t =
     let () = match status with
       | Proofmode (_, _, _, g :: _) -> print_endline (Goal.print g ctx)
       | _ -> () in
+    let () = print_endline (EC.print ctx) in
     raise (Error ((ctx, status), Stop))
 
 let print_error e _ctx =
