@@ -126,8 +126,7 @@ module Context = struct
 
   let push_var ?(avoid_capture=true) (v, ty, body, impl) ctx =
     let d = IMap.cardinal ctx.ctx.E.var in
-    let v = if avoid_capture then Utils.fresh_name v (List.map fst (SMap.to_list ctx.var)) else v in
-    let ectx, _ = EC.push_var ~avoid_capture:false (v, ty, body, impl) ctx.ctx in
+    let ectx, _ = EC.push_var ~avoid_capture (v, ty, body, impl) ctx.ctx in
     { ctx with var = SMap.update v (fun l -> Some (d :: Option.value ~default:[] l)) ctx.var; ctx = ectx }, ()
 
   let pop_var ctx =
@@ -191,7 +190,7 @@ let print t =
     | Fun (f, tele, t) -> ((if f then "forall " else "fun ") + String.concat " " (List.map (fun (v, ty, t, impl) -> (if impl then "{" else "(") + v + " : " + fst (aux ty) + (match t with | None -> "" | Some t -> " := " + fst (aux t)) + (if impl then "}" else ")")) tele) + (if f then ", " else " => ") + fst (aux t)), false
     | Ind (v, a, c) -> "ind " + v +  " : " + fst (aux a) + " :=" + " | " + String.concat " | " (List.map (fun t -> fst (aux t)) c), false
     | Construct (ind, id) -> "ind.mk(" + fst (aux ind) + ")." + string_of_int id, true
-    | Case (r, s, ind, ty, b) -> "match " + (if r then "rec " else "") + fst (aux s) + (match ind with | None -> " " | Some ind -> "as " + fst (aux ind)) + " return " + fst (aux ty) + " with " + String.concat " " (List.map (fun (l, r) -> "| " + fst (aux l) + " => " + fst (aux r)) b), false
+    | Case (r, s, ind, ty, b) -> "match " + (if r then "rec " else "") + fst (aux s) + (match ind with | None -> " " | Some ind -> " as " + fst (aux ind)) + " return " + fst (aux ty) + " with " + String.concat " " (List.map (fun (l, r) -> "| " + fst (aux l) + " => " + fst (aux r)) b), false
     | Evar v -> (if v = "_" then "?" else ("?" + v)), true
     | App _ -> let (t, args) = destApp t in fst (aux t) + " " + String.concat " " (List.map (fun (t, atomic) -> if atomic then t else "(" + t + ")") (List.map aux args)), false in
   fst (aux t)
@@ -259,10 +258,11 @@ let rec elaborate (t : t) =
     | Construct (ind, i) -> let+ ind = elaborate ind in E.of_hd (E.Construct (ind, i))
     | Case (r, s, ind, rty, br) ->
       let* s = elaborate s in
-      let* ind = match ind with | None -> Context.Monad.of_engine (E.typecheck s) | Some ind -> elaborate ind in
+      let* ind' = match ind with | None -> Context.Monad.of_engine (E.typecheck s) | Some ind -> elaborate ind in
       let* rty = elaborate rty in
-      let* whind = Context.Monad.of_engine (EC.Monad.to_mut (E.whd ind)) in
-      let* (_, a, cs) = Context.Monad.of_engine (fun ctx -> try ctx, E.destInd (E.of_hd whind.hd) with Not_found -> raise (E.TypeError (ctx, E.IllFormed ind))) in
+      let* whind = Context.Monad.of_engine (EC.Monad.to_mut (E.whd ind')) in
+      let ind = E.of_hd whind.hd in
+      let* (_, a, cs) = Context.Monad.of_engine (fun ctx -> try ctx, E.destInd ind with Not_found -> raise (E.TypeError (ctx, E.IllFormed ind'))) in
 
       let* () = Context.push_var ~avoid_capture:false ("_", a, Some ind, false) in
       let* br = Context.Monad.List.map (fun (c, r) ->
@@ -289,7 +289,7 @@ let rec elaborate (t : t) =
 
       let* br = Context.Monad.List.fold_left (fun (i, br) brs ctx -> if IMap.mem i brs then raise (Error (ctx, DuplicateBranch i)) else ctx, IMap.add i br brs) br IMap.empty in
       let+ br = fun ctx -> ctx, List.mapi (fun i (j, br) -> if i <> j then raise (Error (ctx, MissingBranch i)) else br) (IMap.to_list br) in
-      E.{hd = E.Case (ind, r); args = rty :: br @ [s] }
+      E.{hd = E.Case (ind, r); args = rty :: br @ whind.args @ [s] }
     | Evar s ->
         if s = "_" then Context.Monad.of_engine (EC.new_evar ~with_ctx:true) else
         (fun ctx -> try ctx, E.of_hd (E.Evar (SMap.find s ctx.evar)) with _ ->

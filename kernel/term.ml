@@ -94,7 +94,7 @@ let destLet t =
 
 let destInd t =
   match t.hd with
-  | Ind (v, a, c) (* Assuming t is well-typed, t.args is empty *) -> (v, a, c)
+  | Ind (v, a, c) when List.is_empty t.args -> (v, a, c)
   | _ -> raise Not_found
 
 let destConstruct t =
@@ -247,16 +247,18 @@ let rec fold ?(avoid_capture=true) fold_hd fold_app t =
 let print ?(debug=false) t =
   let (+) = String.cat in
   let ret = Context_.Monad.ret in
-  let+* (t, _) = Context_.Monad.to_imut (fold (function
+  let rec fold_hd = function
     | Var v -> if debug then ret ("_" + string_of_int v, true) else let** c = Context_.get_var_name v in ret (c, true)
     | Const (c, s, u) -> ret (c + "@{" + String.concat ", " (List.map Univ.Sort.print s) + ";" + String.concat ", " (List.map Univ.Level.print u) + "}", true)
+    | Fun (forall, (v, ty, Some t, _) :: tele, body) -> let+ (body, _) = if List.is_empty tele then ret body else fold_hd (Fun (forall, tele, body)) in ("let " + v + " : " + (fst ty) + " := " + (fst t) + " in " + body, false)
     | Fun (forall, tele, body) -> ret ((if forall then "forall " else "fun ") + String.concat " " (List.map (fun (v, ty, t, impl) ->
           (if impl then "{" else "(") + v + " : " + fst ty + (match t with | None -> "" | Some t -> " := " + fst t) + (if impl then "{" else ")")
       ) tele) + (if forall then ", " else " => ") + fst body, false)
     | Type u -> ret (Univ.print u, true)
     | Ind (v, a, c) -> ret ("ind " + v + " : " + fst a + " :=" + " | " + String.concat " | " (List.map fst c), false)
     | Construct (ind, id) -> ret ("ind.mk(" + fst ind + ")." + string_of_int id, true)
-    | Case (ind, recursive) -> ret ((if recursive then "ind.fix(" else "ind.case(") + fst ind + ")", true))
+    | Case (ind, recursive) -> ret ((if recursive then "ind.fix(" else "ind.case(") + fst ind + ")", true) in
+  let+* (t, _) = Context_.Monad.to_imut (fold fold_hd
     (function
       | [hd] -> ret hd
       | args -> ret (String.concat " " (List.map (fun (t, atomic) -> if atomic then t else "(" + t + ")") args), false)) t) in
@@ -597,6 +599,7 @@ let rec fold_left_args_with_type args ty f acc =
     let n = Dynarray.length args' in
     if n = 0 then t else subst (fun i -> if i < n then Dynarray.get args' (n - i - 1) else mkVar (i - n)) t in
   let** tele, ty = destArity ~whd_rty:false ~until:(AtMost (List.length args)) ty in
+  if List.is_empty tele then fun ctx -> raise (TypeError (ctx, IllegalApplication ty)) else
   let args, rargs = List.split_at (List.length tele) args in
   let* acc = Context_.Monad.List.fold_left (fun (arg, (_, ty, _, _)) acc ->
     let ty = subst ty in
@@ -694,9 +697,11 @@ let rec typecheck t =
       (* Check ind is well-typed *)
       let* _ = typecheck ind in
       let** ind' = whd ind in
+      let ind' = of_hd ind'.hd in
       let** _, _, c = fun ctx -> try destInd ind' with _ -> raise (TypeError (ctx, IllFormed t)) in
       if List.length c <= i then fun ctx -> raise (TypeError (ctx, IllFormed t)) else
-      ret (beta ind (List.nth c i))
+      (* TODO: find a way to keep the folded version. *)
+      ret (beta ind' (List.nth c i))
     | Case (ind', recursive) ->
       (* Check ind is well-typed *)
       let* _ = typecheck ind' in
@@ -710,7 +715,7 @@ let rec typecheck t =
       let* runiv = Context_.new_univ in
       let* () = Context_.add_univ_constraint runiv asort in
       (* Build the predicate that gives the return type of the match... *)
-      let rty = mkForall (atele @ [("_", mkApp (List.init na (fun i -> of_hd (Var (na-i-1)))) ind', None, false)]) (of_hd (Type runiv)) in
+      let rty = mkForall (atele @ [("_", mkApp (List.init na (fun i -> of_hd (Var (na-i-1)))) (bump na ind'), None, false)]) (of_hd (Type runiv)) in
       (* Start building the result's telescope, in reverse order *)
       let revtele = [("_", rty, None, false)] in
       (* The constructors expect the inductive type to be at position 0 in the context. *)
@@ -740,10 +745,10 @@ let rec typecheck t =
         (* We need to bump because there is the predicate between the arguments the constructors might refer to and the constructors themselves. *)
         let** ctele, cret = destArity (bump 1 (beta ind' (mkForall ctele cret))) in
         let ctele = ctele @ rec_calls in
-        let arg = mkForall ctele (bump (List.length rec_calls) { hd = Var nc; args = [{ hd = Construct (cret, ic); args = List.init nc (fun i -> of_hd (Var (nc-1-i))) }] }) in
+        let arg = mkForall ctele (bump (List.length rec_calls) { hd = Var nc; args = (List.drop (List.length cret.args - na) cret.args) @ [{ hd = Construct (cret, ic); args = List.init nc (fun i -> of_hd (Var (nc-1-i))) }] }) in
         let arg = bump ic arg in
         Context_.Monad.iret (ic+1, ("_", arg, None, false) :: revtele)) (Context_.Monad.iret (0, revtele)) c in
-      let revtele = ("_", mkApp (List.init na (fun i -> mkVar (na-i-1))) (bump (na+nc+1) ind'), None, false) :: revtele in
+      let revtele = ("_", mkApp (List.init na (fun i -> mkVar (na-i-1))) (bump (na+nc+1) ind'), None, false) :: (List.map (fun (v, ty, t, impl) -> (v, bump (nc+1) ty, t, impl)) (List.rev atele)) @ revtele in
       let tele = List.rev revtele in
       let ty = mkForall tele { hd = Var (na+nc+1); args = List.init (na+1) (fun i -> mkVar (na-i)) }in
       ret ty) in

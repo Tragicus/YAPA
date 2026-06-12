@@ -1,6 +1,7 @@
 open Yapa
 
 let () =
+  let () = Random.init 0 in
   let file = ref "" in
   let () = Arg.parse [] (fun s -> file := s) "" in
   let lexbuf = Lexing.from_channel (if !file = "" then Stdlib.stdin else open_in !file) in

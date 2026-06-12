@@ -56,6 +56,14 @@ module Option = struct
     | Some x -> f x
 end
 
+module Random = struct
+  let int () = Random.int 999999999
+end
+
+let timestamp x =
+  let s = string_of_int (Random.int x) in
+  s ^ String.make (9 - String.length s) ' '
+
 let min_smap m = SMap.fold (fun _ -> min) m max_int
 let max_smap m = SMap.fold (fun _ -> max) m min_int
 let min_imap m = IMap.fold (fun _ -> min) m max_int
