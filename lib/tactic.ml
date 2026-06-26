@@ -12,11 +12,13 @@ type t =
   | Intro of string list
   | Clear of string list
   | Assumption
+  | Auto
   | Seq of t list
 
 type error = 
   | NameConflict of string
   | NoMatchingAssumption
+  | NoProgress
 
 exception Error of EC.t * error
 
@@ -27,8 +29,24 @@ let rec print = function
   | Intro l -> "intros " ^ String.concat " " l ^ "."
   | Clear l -> "clear " ^ String.concat " " l ^ "."
   | Assumption -> "assumption."
+  | Auto -> "auto."
   | Seq [] -> "idtac."
   | Seq tacs -> String.concat "; " (List.map print tacs)
+
+let print_error = function
+  | NameConflict s -> "Name conflict with " ^ s
+  | NoMatchingAssumption -> "No matching assumption"
+  | NoProgress -> "No progress"
+
+let rec apply goal t ty ctx =
+(*   let () = let goal = E.print goal ctx in let t = E.print t ctx in let ty = E.print ty ctx in print_string (goal ^ " <- " ^ t ^ " : " ^ ty ^ "\n") in *)
+  try let ctx, () = E.instantiate_evar goal t ctx in ctx, Goal.collect_goals t ctx with | _ ->
+  let ctx, (tele, ty) = E.destArity ~whd_rty:false ~until:(Exact 1) ty ctx in
+  match tele with
+  | [(_, argty, None, _)] ->
+    let ctx, ev = EC.new_evar ~ty:(Some argty) ~with_ctx:true ctx in
+    apply goal (E.mkApp [ev] t) (E.beta ev ty) ctx
+  | _ -> failwith "unreachable"
 
 let rec exec tac goal =
 (*   let () = print_endline ("exec " ^ print tac) in *)
@@ -53,19 +71,9 @@ let rec exec tac goal =
   | Apply [t] ->
     Goal.enter goal (fun goal ->
     let* t = PC.Monad.to_engine (P.elaborate t) in
-    let* tg = E.typecheck goal in
 (*     let** () = let** tg = E.print tg in let+* t = E.print t in print_endline ("apply " ^ t ^ " : " ^ tg) in *)
-    let rec apply t ty =
-      let* b = E.unify ~cumulative:E.Cumul ty tg in
-      if b then let* () = E.instantiate_evar goal t in EC.Monad.to_mut (Goal.collect_goals t) else
-      let* tele, ty = E.destArity ~whd_rty:false ~until:(Exact 1) ty in
-      match tele with
-      | [(_, argty, None, _)] ->
-        let* ev = EC.new_evar ~ty:(Some argty) ~with_ctx:true in
-        apply (E.mkApp [ev] t) (E.beta ev ty)
-      | _ -> failwith "unreachable" in
     let* ty = E.typecheck t in
-    apply t ty)
+    apply goal t ty)
   | Apply l -> exec (Seq (List.map (fun t -> Apply [t]) l)) goal
   | Intro names -> 
     let** _ = fun ctx ->
@@ -98,6 +106,17 @@ let rec exec tac goal =
       try let ctx, () = E.instantiate_evar concl (E.mkVar i) ctx in ctx, []
       with _ -> loop (i + 1) ctx in
     loop 0)
+  | Auto -> Goal.enter goal (fun concl ->
+    let* tg = E.typecheck concl in
+    let rec try_hints = function
+      | [] -> fun ctx -> raise (Error (ctx, NoProgress))
+      | hint :: hints ->
+(*       let** () = let+* hint = E.print hint in print_string ("try hint " ^ hint ^ "\n") in *)
+      let* ty = E.typecheck hint in fun ctx ->
+      try apply concl hint ty ctx with | _ ->
+      try_hints hints ctx in
+    let** hints = EC.get_hints tg in
+    try_hints hints)
   | Seq [] -> ret [goal]
   | Seq (tac :: tacs) ->
 (*     let () = print_endline ("seq") in *)

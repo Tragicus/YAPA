@@ -42,8 +42,11 @@ rule token = parse
   | "intro" { INTRO }
   | "clear" { CLEAR }
   | "assumption" { ASSUMPTION }
+  | "auto" { AUTO }
   | "Qed" { QED }
   | "Defined" { DEFINED }
+  | "Hint" { HINT }
+  | "for" { FOR }
   | "," { COMMA }
   | "." { DOT }
   | ":" { COLON }

@@ -35,7 +35,8 @@ type context = {
   univ : Kernel.Univ.Context.t;
   var : t binder IMap.t;
   const : (Kernel.Univ.Context.t * Kernel.Term.t * Kernel.Term.t option) SMap.t;
-  evar : (t * t option * (t binder IMap.t * t * t) list) IMap.t
+  evar : (t * t option * (t binder IMap.t * t * t) list) IMap.t;
+  hints : Kernel.Term.term Pattern.Map.t
 }
 
 module CMonad = Utils.ContextMonad(struct type t = context end)
@@ -178,8 +179,8 @@ let rec of_kernel (t : Kernel.Term.t) =
 module Context_ = struct
   type t = context
 
-  let empty = { univ = Kernel.Univ.Context.empty; var = IMap.empty; const = SMap.empty; evar = IMap.empty }
-  let reset ctx = { univ = Kernel.Univ.Context.empty; var = IMap.empty; const = ctx.const; evar = IMap.empty }
+  let empty = { univ = Kernel.Univ.Context.empty; var = IMap.empty; const = SMap.empty; evar = IMap.empty; hints = Pattern.Map.empty }
+  let reset ctx = { univ = Kernel.Univ.Context.empty; var = IMap.empty; const = ctx.const; evar = IMap.empty; hints = ctx.hints }
 
   let depth ctx = match IMap.max_binding_opt ctx.var with | None -> 0 | Some (x, _) -> x + 1
 
@@ -226,7 +227,6 @@ module Context_ = struct
         | Evar i -> ret (Evar i)
     end
   end
-
 
   let univ ctx = ctx.univ
 
@@ -309,7 +309,6 @@ module Context_ = struct
   let add_evar_constraint t1 t2 =
     let i = destEvar (of_hd t1.hd) in
     fun ctx -> { ctx with evar = IMap.update i (function | None -> raise (TypeError (ctx, (UnboundEvar i))) | Some (ty, t, cstrs) -> Some (ty, t, (ctx.var, t1, t2) :: cstrs)) ctx.evar }, ()
-
 
 end
 
@@ -468,6 +467,23 @@ let subst_univ ss su t =
     | Type (s, u) -> Type (Kernel.Univ.Sort.subst ss s, Kernel.Univ.Level.subst su u)
     | t -> t))
     (function | [] -> failwith "unreachable" | t :: args -> Context_.Monad.ret { hd = t.hd; args }) t)
+
+let to_pattern t =
+  let ret = Context_.Monad.ret in
+  Context_.Monad.to_imut (fold ~avoid_capture:false ~keep_evars:false (fun hd -> ret @@ Pattern.of_hd
+    (match hd with
+    | Var i -> Pattern.Var i
+    | Const (v, _, _) -> Pattern.Const v
+    | Fun (f, tele, body) -> Pattern.Fun (f, List.map (fun (_, ty, t, _) -> (ty, t)) tele, body)
+    | Type _ -> Pattern.Type
+    | Ind (_, a, c) -> Pattern.Ind (a, c)
+    | Construct (ind, i) -> Pattern.Construct (ind, i)
+    | Case (ind, r) -> Pattern.Case (ind, r)
+    | Evar _ -> Pattern.Any))
+  (fun args -> ret { Pattern.hd = (List.hd args).hd; Pattern.args = List.tl args })
+  t)
+
+let get_hints t ctx = List.map of_kernel (Pattern.Map.find_all ctx.hints (to_pattern t ctx))
 
 type cumulativity = Conv | Cumul | Cocumul
 let swap_cumulativity = function
@@ -1292,6 +1308,8 @@ module Context = struct
     fun ctx ->
       let kctx, () = Kernel.Term.Context.push_const c (ty, t) (to_kernel ctx) in
       { ctx with univ = kctx.univ; const = kctx.const }, ()
+
+  let get_hints = get_hints
 
   let print ?(debug=false) ctx =
     let ectx = { ctx with var = IMap.empty } in

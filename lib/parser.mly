@@ -6,8 +6,9 @@
 %token TYPE PROP SPROP
 %token IND PIPE MATCH REC WITH RETURN END MK
 %token PRINT CHECK DEF PROOF WHD EVAL STOP
-%token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION
+%token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION AUTO
 %token QED DEFINED
+%token HINT FOR
 
 %nonassoc AT
 %nonassoc COMMA
@@ -49,6 +50,7 @@ command:
   | EVAL; term; DOT { Commands.Eval $2 }
   | QED; DOT { Commands.Qed false }
   | DEFINED; DOT { Commands.Qed true }
+  | HINT; term; FOR; term; DOT { Commands.Hint ($4, $2) }
   | STOP; DOT { Commands.Stop }
   | tac; DOT { Commands.Tac $1 }
 
@@ -62,6 +64,7 @@ tac_atom:
   | INTRO; list(VAR) { Tactic.Intro $2 }
   | CLEAR; list(VAR) { Tactic.Clear $2 }
   | ASSUMPTION { Tactic.Assumption }
+  | AUTO { Tactic.Auto }
   | LPAR; tac; RPAR { $2 }
 
 type_annotation:

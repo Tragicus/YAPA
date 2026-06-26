@@ -5,5 +5,6 @@ module Lexer = Lexer
 module Parser = Parser
 module Term = Term
 module Commands = Commands
+module Tactic = Tactic
 module Goal = Goal
 module Printers = Printers
