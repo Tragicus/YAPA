@@ -1,11 +1,12 @@
 %token <int> INT
 %token <string> VAR
+%token <string> STRING
 %token EOF
 %token LPAR RPAR LCBRACE RCBRACE FUN ARROW
 %token LET IN FORALL TARROW COMMA DOT COLON SCOLON COLONEQ AT HOLE
 %token TYPE PROP SPROP
 %token IND PIPE MATCH REC WITH RETURN END MK
-%token PRINT CHECK DEF PROOF WHD EVAL STOP
+%token PRINT CHECK DEF PROOF WHD EVAL SET UNSET STOP
 %token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION AUTO
 %token QED DEFINED
 %token HINT FOR
@@ -25,23 +26,23 @@
 %{
   (*open Utils*)
 
-%}
+  %}
 
 %%
 
 toplevel:
   | list(command); EOF { $1 }
 
-univ_annot:
+  univ_annot:
   | AT; LCBRACE; VAR; SCOLON; VAR RCBRACE { $3, Utils.SMap.singleton $5 0 }
 
-univ_annots:
+  univ_annots:
   | AT; LCBRACE; separated_list(COMMA, VAR); SCOLON; separated_list(COMMA, VAR); RCBRACE { $3, List.map (fun u -> Utils.SMap.singleton u 0) $5 }
 
-univ_decls:
+  univ_decls:
   | AT; LCBRACE; separated_list(COMMA, VAR); SCOLON; separated_list(COMMA, VAR); RCBRACE { $3, $5 }
 
-command:
+  command:
   | PRINT; term; DOT { Commands.Print $2 }
   | CHECK; term; DOT { Commands.Check $2 }
   | DEF; VAR; option(univ_decls); telescope; option(type_annotation); option(body_annotation); DOT { Commands.Define ($2, $3, Term.mkForall $4 (Option.value ~default:(Term.of_hd (Term.Evar "_")) $5), Term.mkFun $4 (Option.value ~default:(Term.of_hd (Term.Evar "_")) $6)) }
@@ -51,6 +52,8 @@ command:
   | QED; DOT { Commands.Qed false }
   | DEFINED; DOT { Commands.Qed true }
   | HINT; term; FOR; term; DOT { Commands.Hint ($4, $2) }
+  | SET; STRING; COLONEQ; STRING; DOT { Commands.Set ($2, $4) }
+  | UNSET; STRING; DOT { Commands.Unset $2 }
   | STOP; DOT { Commands.Stop }
   | tac; DOT { Commands.Tac $1 }
 

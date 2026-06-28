@@ -36,7 +36,8 @@ type context = {
   var : t binder IMap.t;
   const : (Kernel.Univ.Context.t * Kernel.Term.t * Kernel.Term.t option) SMap.t;
   evar : (t * t option * (t binder IMap.t * t * t) list) IMap.t;
-  hints : Kernel.Term.term Pattern.Map.t
+  hints : Kernel.Term.term Pattern.Map.t;
+  flags : string SMap.t
 }
 
 module CMonad = Utils.ContextMonad(struct type t = context end)
@@ -179,8 +180,8 @@ let rec of_kernel (t : Kernel.Term.t) =
 module Context_ = struct
   type t = context
 
-  let empty = { univ = Kernel.Univ.Context.empty; var = IMap.empty; const = SMap.empty; evar = IMap.empty; hints = Pattern.Map.empty }
-  let reset ctx = { univ = Kernel.Univ.Context.empty; var = IMap.empty; const = ctx.const; evar = IMap.empty; hints = ctx.hints }
+  let empty = { univ = Kernel.Univ.Context.empty; var = IMap.empty; const = SMap.empty; evar = IMap.empty; hints = Pattern.Map.empty; flags = SMap.empty }
+  let reset ctx = { ctx with univ = Kernel.Univ.Context.empty; var = IMap.empty; evar = IMap.empty }
 
   let depth ctx = match IMap.max_binding_opt ctx.var with | None -> 0 | Some (x, _) -> x + 1
 
@@ -309,6 +310,12 @@ module Context_ = struct
   let add_evar_constraint t1 t2 =
     let i = destEvar (of_hd t1.hd) in
     fun ctx -> { ctx with evar = IMap.update i (function | None -> raise (TypeError (ctx, (UnboundEvar i))) | Some (ty, t, cstrs) -> Some (ty, t, (ctx.var, t1, t2) :: cstrs)) ctx.evar }, ()
+
+  let get_flag_opt flag ctx = SMap.find_opt flag ctx.flags
+  let add_flag flag value ctx =
+    { ctx with flags = SMap.add flag value ctx.flags }, ()
+  let remove_flag flag ctx =
+    { ctx with flags = SMap.remove flag ctx.flags }, ()
 
 end
 
@@ -930,7 +937,13 @@ and unify ?(cumulative=Conv) t1 t2 =
     if progress then Some t else None in
 
   let rec aux ~cumulative o1 o2 t1 t2 =
-(*     let** () = let** t1 = print t1 in let+* t2 = print t2 in print_endline (timestamp ^ ": " ^ t1 ^ (match cumulative with | Conv -> " =~= " | Cumul -> " <~= " | Cocumul -> " >~= ") ^ t2) in *)
+     let** debug = Context_.get_flag_opt "debug-unification" in
+     let debug = Option.is_some debug in
+     let** () =
+       if not debug then Context_.Monad.iret () else
+       let** t1 = print t1 in
+       let+* t2 = print t2 in
+       print_endline (timestamp ^ ": " ^ t1 ^ (match cumulative with | Conv -> " =~= " | Cumul -> " <~= " | Cocumul -> " >~= ") ^ t2) in
     let** b = eq t1 t2 in
     if b then ret true else
     rigid ~cumulative t1 t2 ||

@@ -14,6 +14,8 @@ type t =
   | Qed of bool
   | Hint of P.t (* pat *) * P.t (* hint *)
   | Skip
+  | Set of string (* flag *) * string (* value *)
+  | Unset of string (* flag *)
   | Stop
 
 type error =
@@ -62,12 +64,14 @@ let print cmd =
   | Qed b -> if b then "Defined" else "Qed"
   | Hint (pat, hint) -> "Hint " + Term.print hint + " for " + Term.print pat
   | Skip -> "Skip"
+  | Set (flag, value) -> "Set " + flag + " := " + value
+  | Unset flag -> "Unset " + flag
   | Stop -> "Stop"
 
 let eval cmd : unit Context.Monad.t =
   let (+) = String.cat in
   let ret = Context.Monad.ret in
-(*   let () = print_endline (print cmd) in *)
+  let () = print_endline (print cmd) in
   match cmd with
   | Print t ->
     let (c, _) = try P.destConst t with _ -> failwith "I can only print the body of constants" in
@@ -136,6 +140,12 @@ let eval cmd : unit Context.Monad.t =
     (* Do not forget to restore the context. *)
     fun (_, status) -> (ctx, status), ()
   | Skip -> ret ()
+  | Set (flag, value) -> fun (ctx, status) ->
+    let ctx, () = EC.add_flag flag value ctx in
+    (ctx, status), ()
+  | Unset flag -> fun (ctx, status) ->
+    let ctx, () = EC.remove_flag flag ctx in
+    (ctx, status), ()
   | Stop -> fun (ctx, status) ->
     let () = match status with
       | Proofmode (_, _, _, g :: _) -> print_endline (Goal.print g ctx)
