@@ -65,6 +65,7 @@ rule token = parse
   | ":" { COLON }
   | ";" { SCOLON }
   | ":=" { COLONEQ }
+  | "@{" { ATLCBRACE }
   | '@' { AT }
   | '_' { HOLE }
   | ['a'-'z' 'A'-'Z'] ['a'-'z' 'A'-'Z' '0'-'9' '_']* as s { VAR s }

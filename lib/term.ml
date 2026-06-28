@@ -31,10 +31,10 @@ let clear_implicits t = { t with implicits = false }
 let mkConst c su = of_hd (Const (c, su))
 let mkVar v = mkConst v None
 let mkForallOrFun forall tele t =
-  clear_implicits (if List.is_empty tele then t else
-    of_hd (match t.hd with
+  if List.is_empty tele then t else
+  clear_implicits (of_hd (match t.hd with
     | Fun (forall', tele', body) when forall' = forall ->
-        Fun (forall, tele @ tele', body)
+      Fun (forall, tele @ tele', body)
     | _ -> Fun (forall, tele, t)))
 let mkForall = mkForallOrFun true
 let mkFun = mkForallOrFun false
@@ -193,7 +193,9 @@ let print t =
     | Case (r, s, ind, ty, b) -> "match " + (if r then "rec " else "") + fst (aux s) + (match ind with | None -> " " | Some ind -> " as " + fst (aux ind)) + " return " + fst (aux ty) + " with " + String.concat " " (List.map (fun (l, r) -> "| " + fst (aux l) + " => " + fst (aux r)) b), false
     | Evar v -> (if v = "_" then "?" else ("?" + v)), true
     | App _ -> let (t, args) = destApp t in fst (aux t) + " " + String.concat " " (List.map (fun (t, atomic) -> if atomic then t else "(" + t + ")") (List.map aux args)), false in
-  fst (aux t)
+  let s, atom = aux t in
+  if t.implicits then s else
+  "@" + if atom then s else "(" + s + ")"
 
 type error =
   | UnboundSort of string
@@ -223,7 +225,7 @@ let rec elaborate (t : t) =
       let ctx, u = Context.Monad.List.map (fun (u, i) ctx -> ctx, try Kernel.Univ.Level.add i (SMap.find u ctx.univ) with _ -> raise (Error (ctx, UnboundUniv u))) (SMap.to_list u) ctx in
       ctx, List.fold_left Kernel.Univ.Level.max Kernel.Univ.Level.base u in
   let hd, args = safe_dest_app t in
-  let impl = hd.implicits && t.implicits in
+  let impl = hd.implicits in
   let* hd = match hd.hd with
     | Type (s, u) -> let* s = sort s in let+ u = univ u in E.of_hd (E.Type (s, u))
     | Const (c, su) ->
@@ -300,7 +302,7 @@ let rec elaborate (t : t) =
   let* args = Context.Monad.List.map elaborate args in
   if not impl then Context.Monad.ret (E.mkApp args hd) else
   let* ty = Context.Monad.of_engine (E.typecheck hd) in
-  let* tele, _ = Context.Monad.of_engine (E.destArity ~until:(Exact (List.length args)) ~count_implicits:false ty) in
+  let* tele, ty = Context.Monad.of_engine (E.destArity ~until:(Exact (List.length args)) ~count_implicits:false ~trailing_implicits:false ty) in
 
   let args' = Dynarray.create () in
   let subst t =
@@ -316,8 +318,15 @@ let rec elaborate (t : t) =
     let args = if impl then args else List.tl args in
     let () = Dynarray.add_last args' arg in
     loop (arg :: rargs) args tele in
-  let+ rargs = Context.Monad.of_engine (loop [] args tele) in
-  E.mkApp (List.rev rargs) hd
+  let* rargs = Context.Monad.of_engine (loop [] args tele) in
+  let impl = t.implicits in
+  let t = E.mkApp (List.rev rargs) hd in
+  if not impl then Context.Monad.ret t else
+  let* tele, _ = Context.Monad.of_engine (E.destArity ~until:(Exact 0) ~count_implicits:false ty) in
+  let+ rargs = Context.Monad.of_engine (loop [] [] tele) in
+  E.mkApp (List.rev rargs) t
+
+
 
 let print_error e =
   let (+) = String.cat in

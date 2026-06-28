@@ -71,7 +71,7 @@ let print cmd =
 let eval cmd : unit Context.Monad.t =
   let (+) = String.cat in
   let ret = Context.Monad.ret in
-  let () = print_endline (print cmd) in
+(*   let () = print_endline (print cmd) in *)
   match cmd with
   | Print t ->
     let (c, _) = try P.destConst t with _ -> failwith "I can only print the body of constants" in

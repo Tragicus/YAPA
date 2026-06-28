@@ -675,12 +675,12 @@ and whd ?(flags=whd_flags_all) t =
 
 (* Splits `forall x1 ... xk, ty` into `[x1; ...; xn], forall x(n+1) ... xk, ty`. If `n` is None, takes the longest list possible. *)
 (* TODO: This is in quadratic time, I may be able to optimize by taking care of the zeta-redexes by hand. *)
-and destArity ?(whd_rty=false) ?(keep_let=false) ?(until=Max) ?(count_implicits=true) (t : t) : (t telescope * t) Context_.Monad.t =
+and destArity ?(whd_rty=false) ?(keep_let=false) ?(until=Max) ?(count_implicits=true) ?(trailing_implicits=true) (t : t) : (t telescope * t) Context_.Monad.t =
 (*   let** () = let+* t = print t in print_endline ("destArity " ^ (match until with | Max -> "= oo" | Exact n -> "= " ^ string_of_int n | AtMost n -> "<= " ^ string_of_int n) ^ " " ^ t) in *)
   let ret = Context_.Monad.ret in
   let flags = { whd_flags_all with zeta = not keep_let } in
   let rec aux until rtele t =
-    if count_implicits && until_opt until = Some 0 then let** t = if whd_rty then whd t else Context_.Monad.iret t in ret (rtele, t) else
+    if not trailing_implicits && until_opt until = Some 0 then let** t = if whd_rty then whd t else Context_.Monad.iret t in ret (rtele, t) else
     let** t' = whd ~flags t in
     match t'.hd with
     | Fun (true, (_, _, _, false) :: _, _) when until_opt until = Some 0 -> ret (rtele, if whd_rty then t' else t)

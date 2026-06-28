@@ -3,7 +3,7 @@
 %token <string> STRING
 %token EOF
 %token LPAR RPAR LCBRACE RCBRACE FUN ARROW
-%token LET IN FORALL TARROW COMMA DOT COLON SCOLON COLONEQ AT HOLE
+%token LET IN FORALL TARROW COMMA DOT COLON SCOLON COLONEQ AT ATLCBRACE HOLE
 %token TYPE PROP SPROP
 %token IND PIPE MATCH REC WITH RETURN END MK
 %token PRINT CHECK DEF PROOF WHD EVAL SET UNSET STOP
@@ -11,7 +11,6 @@
 %token QED DEFINED
 %token HINT FOR
 
-%nonassoc AT
 %nonassoc COMMA
 %nonassoc ARROW
 %nonassoc IN
@@ -34,13 +33,13 @@ toplevel:
   | list(command); EOF { $1 }
 
   univ_annot:
-  | AT; LCBRACE; VAR; SCOLON; VAR RCBRACE { $3, Utils.SMap.singleton $5 0 }
+  | ATLCBRACE; VAR; SCOLON; VAR RCBRACE { $2, Utils.SMap.singleton $4 0 }
 
   univ_annots:
-  | AT; LCBRACE; separated_list(COMMA, VAR); SCOLON; separated_list(COMMA, VAR); RCBRACE { $3, List.map (fun u -> Utils.SMap.singleton u 0) $5 }
+  | ATLCBRACE; separated_list(COMMA, VAR); SCOLON; separated_list(COMMA, VAR); RCBRACE { $2, List.map (fun u -> Utils.SMap.singleton u 0) $4 }
 
   univ_decls:
-  | AT; LCBRACE; separated_list(COMMA, VAR); SCOLON; separated_list(COMMA, VAR); RCBRACE { $3, $5 }
+  | ATLCBRACE; separated_list(COMMA, VAR); SCOLON; separated_list(COMMA, VAR); RCBRACE { $2, $4 }
 
   command:
   | PRINT; term; DOT { Commands.Print $2 }
@@ -84,13 +83,12 @@ term:
   | LET; VAR; COLON; term; COLONEQ; term; IN; term { Term.mkFun [($2, $4, Some $6, false)] $8 }
   | IND; VAR; option(type_annotation); constructors; END { Term.mkInd $2 (Option.value ~default:(Term.of_hd (Term.Evar "_")) $3) $4 }
   | MATCH; option(REC); term; option(type_annotation); option(match_return); WITH; list(preceded(PIPE, branch)); END { Term.mkCase ($2 <> None) $3 $4 (Option.value ~default:(Term.of_hd (Term.Evar "_")) $5) $7 }
-  | AT; term { Term.clear_implicits $2 }
   | term; TARROW; term { Term.mkForall [("_", $1, None, false)] $3 }
   | app { $1 }
 
 telescope_elem:
-  | LPAR; nonempty_list(VAR); option(type_annotation); RPAR { let ty = Option.value ~default:(Term.of_hd(Term.Evar "_")) $3 in List.map (fun x -> (x, ty, None, false)) $2 }
-  | LCBRACE; nonempty_list(VAR); option(type_annotation); RCBRACE { let ty = Option.value ~default:(Term.of_hd(Term.Evar "_")) $3 in List.map (fun x -> (x, ty, None, true)) $2 }
+  | LPAR; nonempty_list(VAR); option(type_annotation); RPAR { let ty = Option.value ~default:(Term.of_hd (Term.Evar "_")) $3 in List.map (fun x -> (x, ty, None, false)) $2 }
+  | LCBRACE; nonempty_list(VAR); option(type_annotation); RCBRACE { let ty = Option.value ~default:(Term.of_hd (Term.Evar "_")) $3 in List.map (fun x -> (x, ty, None, true)) $2 }
   | VAR { [$1, Term.of_hd (Term.Evar "_"), None, false] }
 
 %inline
@@ -107,7 +105,12 @@ branch:
   
 %inline
 app:
-  | nonempty_list(sterm) { match $1 with | [] -> assert false | e :: l -> Term.mkApp l e }
+  | nonempty_list(iterm) { match $1 with | [] -> assert false | e :: l -> Term.mkApp l e }
+
+iterm:
+  | AT; iterm { Term.clear_implicits $2 }
+  | sterm { $1 }
+
 
 sterm:
   | VAR; option(univ_annots) { Term.mkConst $1 $2 }
