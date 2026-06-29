@@ -322,8 +322,10 @@ let rec elaborate (t : t) =
   let impl = t.implicits in
   let t = E.mkApp (List.rev rargs) hd in
   if not impl then Context.Monad.ret t else
-  let* tele, _ = Context.Monad.of_engine (E.destArity ~until:(Exact 0) ~count_implicits:false ty) in
-  let+ rargs = Context.Monad.of_engine (loop [] [] tele) in
+  let* () = Context.Monad.of_engine (EC.push_telescope ~avoid_capture:false tele) in
+  let* tele', _ = Context.Monad.of_engine (E.destArity ~until:(Exact 0) ~count_implicits:false ty) in
+  let* rargs = Context.Monad.of_engine (loop [] [] tele') in
+  let+ _ = Context.Monad.of_engine (EC.Monad.List.map (fun _ -> EC.pop_var) (List.init (List.length tele) (fun i -> i))) in
   E.mkApp (List.rev rargs) t
 
 

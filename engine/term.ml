@@ -1285,6 +1285,65 @@ let rec eval t =
 
 let reducible t = let+* t = whd_opt t in Option.is_some t
 
+(* finds a function `fun x1 ... xn => t'` such that `t =~= (fun x1 ... xn => t') pats` *)
+let pattern pats t =
+  let ret = Context_.Monad.ret in
+  let pats = List.rev pats in
+  let t = bump (List.length pats) t in
+  let pats = List.map (bump (List.length pats)) pats in
+  let eq_pat pat pat' =
+    match pat.hd, pat'.hd with
+    | Var v, Var v' -> (v = v')
+    | Const (c, _, _), Const (c', _, _) -> (c = c')
+    (* TODO: Do I want to be more precise? *)
+    | Fun (f, _, _), Fun (f', _, _) -> (f = f')
+    | Type _, Type _ | Ind (_, _, _), Ind (_, _, _) -> true
+    | Construct (_, i), Construct (_, i') -> (i = i')
+    | Case (_, r), Case (_, r') -> (r = r')
+    (* TODO: Do I want to reduce? *)
+    | Evar i, Evar i' -> (i = i')
+    | _, _ -> false in
+  let rec compile t =
+    let** t = whd ~flags:whd_flags_none t in
+    let rec try_pat i = function | [] -> ret None | pat :: pats ->
+      let** () = let** t = print t in let+* pat = print pat in print_string (t ^ " = " ^ pat ^ "\n") in
+      if not (eq_pat pat t) then try_pat (i + 1) pats else
+      let* b = unify pat t in
+      if not b then try_pat (i + 1) pats else
+      ret (Some (mkVar i)) in
+    let* r = try_pat 0 pats in
+    match r with | Some r -> ret r | None ->
+    let* hd = match t.hd with
+    | Var _ | Const (_, _, _) | Type _ | Evar _ -> ret t.hd
+    | Fun (f, tele, body) ->
+      Context_.fold_telescope ~avoid_capture:false (fun rtele (v, ty, t, impl) ->
+        let* ty = compile ty in
+        let+ t = Context_.Monad.Option.map compile t in
+        (v, ty, t, impl) :: rtele) [] tele (fun rtele ->
+        let+ body = compile body in
+        Fun (f, List.rev rtele, body))
+    | Ind (v, a, c) ->
+      let* a = compile a in
+      let+ c = Context_.with_var ~avoid_capture:false (v, a, None, false) (Context_.Monad.List.map compile c) in
+      Ind (v, a, c)
+    | Construct (ind, i) ->
+      let+ ind = compile ind in
+      Construct (ind, i)
+    | Case (ind, r) ->
+      let+ ind = compile ind in
+      Case (ind, r) in
+    let () = print_string ("compile " ^ string_of_int (List.length t.args) ^ " args\n") in
+    let+ args = Context_.Monad.List.map compile t.args in
+    { hd; args } in
+  let* t = compile t in
+  let pats = List.rev pats in
+  let* tys = Context_.Monad.List.map typecheck pats in
+  let tys = List.mapi bump tys in
+  let tys = List.map (fun ty -> ("_", ty, None, false)) tys in
+  let t = mkFun tys t in
+  let+ _ = typecheck t in
+  mkApp pats t
+
 let rec to_kernel t =
   let ret = Context_.Monad.ret in
   let open Kernel in

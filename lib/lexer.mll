@@ -56,6 +56,7 @@ rule token = parse
   | "clear" { CLEAR }
   | "assumption" { ASSUMPTION }
   | "auto" { AUTO }
+  | "pattern" { PATTERN }
   | "Qed" { QED }
   | "Defined" { DEFINED }
   | "Hint" { HINT }

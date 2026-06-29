@@ -12,6 +12,7 @@ type t =
   | Intro of string list
   | Clear of string list
   | Assumption
+  | Pattern of P.t list
   | Auto
   | Seq of t list
 
@@ -29,6 +30,7 @@ let rec print = function
   | Intro l -> "intros " ^ String.concat " " l ^ "."
   | Clear l -> "clear " ^ String.concat " " l ^ "."
   | Assumption -> "assumption."
+  | Pattern l -> "pattern " ^ String.concat ", " (List.map P.print l) ^ "."
   | Auto -> "auto."
   | Seq [] -> "idtac."
   | Seq tacs -> String.concat "; " (List.map print tacs)
@@ -106,6 +108,12 @@ let rec exec tac goal =
       try let ctx, () = E.instantiate_evar concl (E.mkVar i) ctx in ctx, []
       with _ -> loop (i + 1) ctx in
     loop 0)
+  | Pattern pats -> Goal.enter goal (fun g ->
+    let* pats = EC.Monad.List.map (fun t -> PC.Monad.to_engine (P.elaborate t)) pats in
+    let* ty = E.typecheck g in
+    let* ty = E.pattern pats ty in
+    let** (_, t, cstrs) = EC.find_evar goal.goal in
+    fun ctx -> { ctx with evar = IMap.add goal.goal (E.mkForall goal.ctx ty, t, cstrs) ctx.evar }, [goal])
   | Auto -> Goal.enter goal (fun concl ->
     let* tg = E.typecheck concl in
     let rec try_hints = function
