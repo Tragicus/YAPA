@@ -7,7 +7,7 @@
 %token TYPE PROP SPROP
 %token IND PIPE MATCH REC WITH RETURN END MK
 %token PRINT CHECK DEF PROOF WHD EVAL SET UNSET STOP
-%token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION AUTO PATTERN
+%token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION AUTO PATTERN RW
 %token QED DEFINED
 %token HINT FOR
 
@@ -68,6 +68,7 @@ tac_atom:
   | ASSUMPTION { Tactic.Assumption }
   | AUTO { Tactic.Auto }
   | PATTERN; separated_list(COMMA, term) { Tactic.Pattern $2 }
+  | RW; term { Tactic.Rw $2 }
   | LPAR; tac; RPAR { $2 }
 
 type_annotation:

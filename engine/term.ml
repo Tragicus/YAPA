@@ -319,6 +319,11 @@ module Context_ = struct
 
 end
 
+let fresh_const c =
+  let** cuniv = Context_.get_const_univ c in
+  let+ ((s, u), _) = Context_.new_univs_with_constraints cuniv in
+  mkConst c s u
+
 let rec fold ?(avoid_capture=true) ?(keep_evars=false) fold_hd fold_app t =
   let fold = fold ~avoid_capture ~keep_evars fold_hd fold_app in
   let default = 
@@ -417,6 +422,7 @@ let rec eq t t' =
   ret (List.length t.args = List.length t'.args) &&
   (match t.hd, t'.hd with
   | Var v, Var w -> ret (v = w)
+  | Const (c, s, u), Const (c', s', u') ->  ret (c = c') && ret (s = s') && ret (u = u')
   | Fun (f, t, b), Fun (f', t', b') -> ret (f = f') &&
     (ret (List.length t = List.length t')) &&
     Context_.Monad.to_imut (Context_.Monad.List.for_all2 (fun (_, ty, t, _) (_, ty', t', _) -> Context_.Monad.to_mut (eq ty ty' &&
@@ -490,7 +496,10 @@ let to_pattern t =
   (fun args -> ret { Pattern.hd = (List.hd args).hd; Pattern.args = List.tl args })
   t)
 
-let get_hints t ctx = List.map of_kernel (Pattern.Map.find_all ctx.hints (to_pattern t ctx))
+let get_hints t ctx =
+  let t = to_pattern t ctx in
+  let hints = Pattern.Map.find_all ctx.hints t in
+  List.map of_kernel hints
 
 type cumulativity = Conv | Cumul | Cocumul
 let swap_cumulativity = function
@@ -505,6 +514,8 @@ let until_take n = function
   | Exact m -> Exact (m - n)
   | AtMost m -> AtMost (m - n)
 let until_opt = function | Max -> None | Exact n | AtMost n -> Some n
+
+let synthesize : (t -> unit Context_.Monad.t) ref = ref (fun _ -> assert false)
 
 type whd_flags = {
   beta    : bool;
@@ -675,8 +686,9 @@ and whd ?(flags=whd_flags_all) t =
 
 (* Splits `forall x1 ... xk, ty` into `[x1; ...; xn], forall x(n+1) ... xk, ty`. If `n` is None, takes the longest list possible. *)
 (* TODO: This is in quadratic time, I may be able to optimize by taking care of the zeta-redexes by hand. *)
-and destArity ?(whd_rty=false) ?(keep_let=false) ?(until=Max) ?(count_implicits=true) ?(trailing_implicits=true) (t : t) : (t telescope * t) Context_.Monad.t =
-(*   let** () = let+* t = print t in print_endline ("destArity " ^ (match until with | Max -> "= oo" | Exact n -> "= " ^ string_of_int n | AtMost n -> "<= " ^ string_of_int n) ^ " " ^ t) in *)
+and destArity ?(whd_rty=false) ?(keep_let=false) ?(until=Max) ?(count_implicits=true) ?(trailing_implicits=false) (t : t) : (t telescope * t) Context_.Monad.t =
+  let** debug = Context_.get_flag_opt "debug-synthesis" in
+  let** () = if Option.is_some debug then let+* t = print t in print_endline ("destArity " ^ (match until with | Max -> "= oo" | Exact n -> "= " ^ string_of_int n | AtMost n -> "<= " ^ string_of_int n) ^ " " ^ t) else Context_.Monad.iret () in
   let ret = Context_.Monad.ret in
   let flags = { whd_flags_all with zeta = not keep_let } in
   let rec aux until rtele t =
@@ -686,7 +698,7 @@ and destArity ?(whd_rty=false) ?(keep_let=false) ?(until=Max) ?(count_implicits=
     | Fun (true, (_, _, _, false) :: _, _) when until_opt until = Some 0 -> ret (rtele, if whd_rty then t' else t)
     | Fun (true, ((_, _, _, impl) as b) :: tele, body) ->
       Context_.with_var ~avoid_capture:false b (aux (if impl && not count_implicits then until else until_take 1 until) (b :: rtele) (mkForall tele body))
-    | _ when match until with | Exact n when n <> 0 -> false | _ -> true -> ret (rtele, if whd_rty then t' else t)
+    | _ when match until with | Exact n when 0 < n -> false | _ -> true -> ret (rtele, if whd_rty then t' else t)
     | Evar _ ->
       let rec loop rtele until =
         let* u = Context_.new_univ in
@@ -996,8 +1008,10 @@ and safe_dest_type t =
   | _ -> fun ctx -> raise (TypeError (ctx, NotAType t))
 
 and typecheck t =
+  let** _ = fun ctx -> assert (List.for_all (fun (_, (_, k, _)) -> 0 <= k) (IMap.to_list ctx.univ.levels)) in
   let timestamp = timestamp () in let _ = timestamp in
-(*   let** () = let+* t = print t in print_endline (timestamp ^ ": typecheck " ^ t) in *)
+  let** debug = Context_.get_flag_opt "debug-unification" in
+  let** () = if Option.is_some debug then let+* t = print t in print_endline (timestamp ^ ": typecheck " ^ t) else Context_.Monad.iret () in
   let ret = Context_.Monad.ret in
   let* ty = match t.hd with
     | Var i -> Context_.Monad.to_mut (Context_.get_var_type i)
@@ -1151,7 +1165,7 @@ and typecheck t =
       if b then ret (arg, ()) else fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, arg)))
     ) () ctx
     with TypeError (ctx, IllegalApplication _) -> raise (TypeError (ctx, IllegalApplication t)) in
-(*   let** () = let+* ty = print ty in print_endline (timestamp ^ ": type is " ^ ty) in *)
+  let** () = if Option.is_some debug then let+* ty = print ty in print_endline (timestamp ^ ": type is " ^ ty) else Context_.Monad.iret () in
   ret ty
 
 (* For each occurrence of a problematic term in `t` (according to `pb`), performs as many beta-reductions, evar delta-reductions and evar instantiations as needed in the context surrounding the problematic term to make the latter disappear.
@@ -1288,9 +1302,12 @@ let reducible t = let+* t = whd_opt t in Option.is_some t
 (* finds a function `fun x1 ... xn => t'` such that `t =~= (fun x1 ... xn => t') pats` *)
 let pattern pats t =
   let ret = Context_.Monad.ret in
-  let pats = List.rev pats in
+  let* tys = Context_.Monad.List.map typecheck pats in
+  let tys = List.mapi bump tys in
+  let tys = List.map (fun ty -> ("_", ty, None, false)) tys in
+  let* () = Context_.push_telescope ~avoid_capture:false tys in
+  let pats' = List.map (bump (List.length pats)) (List.rev pats) in
   let t = bump (List.length pats) t in
-  let pats = List.map (bump (List.length pats)) pats in
   let eq_pat pat pat' =
     match pat.hd, pat'.hd with
     | Var v, Var v' -> (v = v')
@@ -1306,12 +1323,11 @@ let pattern pats t =
   let rec compile t =
     let** t = whd ~flags:whd_flags_none t in
     let rec try_pat i = function | [] -> ret None | pat :: pats ->
-      let** () = let** t = print t in let+* pat = print pat in print_string (t ^ " = " ^ pat ^ "\n") in
       if not (eq_pat pat t) then try_pat (i + 1) pats else
       let* b = unify pat t in
       if not b then try_pat (i + 1) pats else
       ret (Some (mkVar i)) in
-    let* r = try_pat 0 pats in
+    let* r = try_pat 0 pats' in
     match r with | Some r -> ret r | None ->
     let* hd = match t.hd with
     | Var _ | Const (_, _, _) | Type _ | Evar _ -> ret t.hd
@@ -1332,14 +1348,10 @@ let pattern pats t =
     | Case (ind, r) ->
       let+ ind = compile ind in
       Case (ind, r) in
-    let () = print_string ("compile " ^ string_of_int (List.length t.args) ^ " args\n") in
     let+ args = Context_.Monad.List.map compile t.args in
     { hd; args } in
   let* t = compile t in
-  let pats = List.rev pats in
-  let* tys = Context_.Monad.List.map typecheck pats in
-  let tys = List.mapi bump tys in
-  let tys = List.map (fun ty -> ("_", ty, None, false)) tys in
+  let* _ = Context_.Monad.List.map (fun _ -> Context_.pop_var) (List.init (List.length tys) (fun i -> i)) in
   let t = mkFun tys t in
   let+ _ = typecheck t in
   mkApp pats t

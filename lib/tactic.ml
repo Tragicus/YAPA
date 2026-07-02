@@ -13,6 +13,7 @@ type t =
   | Clear of string list
   | Assumption
   | Pattern of P.t list
+  | Rw of P.t
   | Auto
   | Seq of t list
 
@@ -20,6 +21,7 @@ type error =
   | NameConflict of string
   | NoMatchingAssumption
   | NoProgress
+  | NoRw of E.t
 
 exception Error of EC.t * error
 
@@ -31,24 +33,52 @@ let rec print = function
   | Clear l -> "clear " ^ String.concat " " l ^ "."
   | Assumption -> "assumption."
   | Pattern l -> "pattern " ^ String.concat ", " (List.map P.print l) ^ "."
+  | Rw t -> "rewrite " ^ P.print t ^ "."
   | Auto -> "auto."
   | Seq [] -> "idtac."
   | Seq tacs -> String.concat "; " (List.map print tacs)
 
-let print_error = function
-  | NameConflict s -> "Name conflict with " ^ s
-  | NoMatchingAssumption -> "No matching assumption"
-  | NoProgress -> "No progress"
+let print_error err =
+  let ret = EC.Monad.iret in
+  match err with
+  | NameConflict s -> ret ("Name conflict with " ^ s ^ ".")
+  | NoMatchingAssumption -> ret ("No matching assumption.")
+  | NoProgress -> ret ("No progress.")
+  | NoRw t -> let+* t = E.print t in "Not a rewritable relation : " ^ t ^ "."
 
 let rec apply goal t ty ctx =
-(*   let () = let goal = E.print goal ctx in let t = E.print t ctx in let ty = E.print ty ctx in print_string (goal ^ " <- " ^ t ^ " : " ^ ty ^ "\n") in *)
-  try let ctx, () = E.instantiate_evar goal t ctx in ctx, Goal.collect_goals t ctx with | _ ->
+  let debug = EC.get_flag_opt "debug-synthesis" ctx in
+  let () = if Option.is_some debug then let goal = E.print goal ctx in let t = E.print t ctx in let ty = E.print ty ctx in print_string (goal ^ " <- " ^ t ^ " : " ^ ty ^ "\n") else () in
+  try let ctx, () = E.instantiate_evar goal t ctx in let () = if Option.is_none debug then () else print_endline ("synthesized term is " ^ E.print ~keep_evars:false t ctx) in ctx, Goal.collect_goals t ctx with | _ ->
   let ctx, (tele, ty) = E.destArity ~whd_rty:false ~until:(Exact 1) ty ctx in
   match tele with
   | [(_, argty, None, _)] ->
     let ctx, ev = EC.new_evar ~ty:(Some argty) ~with_ctx:true ctx in
     apply goal (E.mkApp [ev] t) (E.beta ev ty) ctx
   | _ -> failwith "unreachable"
+
+let rec synthesize t =
+  let** debug = EC.get_flag_opt "debug-synthesis" in
+  let** () = if Option.is_some debug then let+* t = E.print t in print_endline ("synthesize " ^ t) else EC.Monad.iret () in
+  let** n = fun ctx -> match IMap.max_binding_opt ctx.E.evar with | None -> 0 | Some (i, _) -> i + 1 in
+  let* tg = E.typecheck t in
+  let rec try_hints = function
+    | [] -> fun ctx -> raise (Error (ctx, NoProgress))
+    | hint :: hints ->
+    let* ty = E.typecheck hint in fun ctx ->
+    try
+      let ctx, subgoals = apply t hint ty ctx in
+      let ctx, _ = EC.Monad.List.map (fun g ->
+        if g.Goal.goal < n then EC.Monad.ret () else
+        let** t = EC.get_evar_body g.Goal.goal in
+        if Option.is_some t then EC.Monad.ret () else
+        Goal.enter g synthesize) subgoals ctx in
+      ctx, ()
+    with | _ -> try_hints hints ctx in
+  let** hints = EC.get_hints tg in
+  try_hints hints
+
+let _ = E.synthesize := synthesize
 
 let rec exec tac goal =
 (*   let () = print_endline ("exec " ^ print tac) in *)
@@ -114,17 +144,35 @@ let rec exec tac goal =
     let* ty = E.pattern pats ty in
     let** (_, t, cstrs) = EC.find_evar goal.goal in
     fun ctx -> { ctx with evar = IMap.add goal.goal (E.mkForall goal.ctx ty, t, cstrs) ctx.evar }, [goal])
+  | Rw rw ->
+    Goal.enter goal (fun concl ->
+      let* rw = PC.Monad.to_engine (P.elaborate rw) in
+      let* rwty = E.typecheck rw in
+      if List.length rwty.E.args < 2 then fun ctx -> raise (Error (ctx, NoRw rwty)) else
+      let args, xy = List.split_at (List.length rwty.E.args - 2) rwty.E.args in
+      let rwty = E.{ hd = rwty.hd; args } in
+      let x, y = match xy with | [x; y] -> x, y | _ -> failwith "unreachable" in
+      let* tyx = E.typecheck x in
+      (* We extract `x` from the conclusion. *)
+      let* tyg = E.typecheck concl in
+      let* f = E.pattern [x] tyg in
+      let f = E.of_hd (f.hd) in
+      (* We find the proof. *)
+      let* hd = E.fresh_const "RwRel" in
+      let* u1 = EC.new_univ in
+      let* u2 = EC.new_univ in
+      let* u3 = EC.new_univ in
+      let* rwrel_evar = EC.new_evar ~ty:(Some { hd = hd.hd; args = [tyx; E.mkType u1; rwty; E.of_hd (Fun (false, [("T", E.mkType u2, None, false); ("U", E.mkType u3, None, false)], E.of_hd (Fun (true, [("_", E.mkVar 0, None, false)], E.mkVar 2)))); f; x; y] }) ~with_ctx:true in
+      let* () = fun ctx -> try !E.synthesize rwrel_evar ctx with _ -> raise (Error (ctx, NoRw rwty)) in
+      let fy = E.{ hd = f.hd; args = [y] } in
+      let** fy = E.whd ~flags:{ E.whd_flags_none with beta = true; steps = Some 1 } fy in
+      let* ry = EC.new_evar ~ty:(Some fy) ~with_ctx:true in
+      let* () = E.instantiate_evar concl (E.mkApp [rw; ry] rwrel_evar) in
+      let** subgoals = Goal.collect_goals ry in
+      EC.Monad.ret subgoals)
   | Auto -> Goal.enter goal (fun concl ->
-    let* tg = E.typecheck concl in
-    let rec try_hints = function
-      | [] -> fun ctx -> raise (Error (ctx, NoProgress))
-      | hint :: hints ->
-(*       let** () = let+* hint = E.print hint in print_string ("try hint " ^ hint ^ "\n") in *)
-      let* ty = E.typecheck hint in fun ctx ->
-      try apply concl hint ty ctx with | _ ->
-      try_hints hints ctx in
-    let** hints = EC.get_hints tg in
-    try_hints hints)
+    let* () = !E.synthesize concl in
+    EC.Monad.to_mut (Goal.collect_goals concl))
   | Seq [] -> ret [goal]
   | Seq (tac :: tacs) ->
 (*     let () = print_endline ("seq") in *)

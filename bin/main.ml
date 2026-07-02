@@ -14,5 +14,5 @@ let () =
     let pos = Lexing.lexeme_start_p lexbuf in
     Printf.printf "Syntax error at line %d, column %d" pos.pos_lnum (pos.pos_cnum - pos.pos_bol)
   | exception Term.Error (_, e) -> print_string (Term.print_error e)
-  | exception Tactic.Error (_, e) -> print_string (Tactic.print_error e)
+  | exception Tactic.Error (ctx, e) -> let e = Tactic.print_error e ctx in print_string e
   | _ -> ()

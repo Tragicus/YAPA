@@ -96,6 +96,12 @@ type univ_error =
 
 exception UnivError of context * univ_error
 
+let print_error = function
+  | UnboundSort i -> "Unbound sort " ^ string_of_int i
+  | UnboundLevel i -> "Unbound universe level " ^ string_of_int i
+  | SortInconsistency (s, t) -> "Inconsistent sort constraint : " ^ Sort.print s ^ " <= " ^ Sort.print t
+  | UnivInconsistency (u, v) -> "Inconsistent universe constraint : " ^ Level.print u ^ " <= " ^ Level.print v
+
 module Context = struct
   type t = context
 
@@ -176,6 +182,7 @@ module Context = struct
   exception Loop of ISet.t
 
   let saturate_model =
+    let** _ = let+* (_, _, ubs) = fun ctx -> IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
     let get_level u = fun ctx -> try IMap.find u ctx.levels with _ -> raise (UnivError (ctx, UnboundLevel u)) in
     let ret = Monad.ret in
     let rec saturate_over dom =
@@ -216,6 +223,7 @@ module Context = struct
 
   (* Adding a constraint [u1 <= u2] to the context of universe levels. *)
   let add_level_constraint u1 u2 ctx =
+    let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
     let ctx = List.fold_left (fun ctx (u, n) ->
       if try let m = IMap.find u u2 in n <= m with _ -> false then ctx else
       let u2 = IMap.remove u u2 in
@@ -232,7 +240,10 @@ module Context = struct
       let ubs = if !ditch then ubs else u2 :: ubs in
       { ctx with levels = IMap.add u (name, m, ubs) ctx.levels }
     ) ctx (IMap.to_list u1) in
-    try saturate_model ctx with Loop _ -> raise (UnivError (ctx, UnivInconsistency (u1, u2)))
+    try let r = saturate_model ctx in
+      let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
+      r
+    with Loop _ -> raise (UnivError (ctx, UnivInconsistency (u1, u2)))
 
   let add_constraint u1 u2 =
     let (s1, u1) = u1 in
@@ -258,15 +269,15 @@ module Context = struct
    * Assumes that this instantiation is correct, i.e. does not change the set of valid
    * instantiations for the other level variables. *)
   let instantiate_level l u ctx =
+    let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
     { ctx with levels = IMap.mapi (fun v (name, m, ubs) -> (name, m,
-        if v == 0 then ubs else
         if v == l then [] else
         List.filter_map (fun ub ->
           match IMap.find_opt l ub with
           | None -> Some ub
           | Some n ->
           if Option.value ~default:true (Option.map (fun m -> 0 <= m + n) (IMap.find_opt v u)) then None else
-          let u = IMap.remove v u in
+          let u = IMap.remove l u in
           Some (Level.max ub (Level.add n u))
         ) ubs)
       ) ctx.levels
@@ -275,6 +286,7 @@ module Context = struct
   (* Removes a level variable from the context, returning a minimal level that may be equal to
    * that level variable according to the current constraints. *)
   let minimize_level u ctx =
+    let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
     if u = 0 then failwith "Anomaly: cannot minimize bottom universe" else
     let lb = IMap.fold (fun v (_, _, ubs) lb ->
       if v = u then lb else
@@ -296,14 +308,15 @@ module Context = struct
   let minimize_model ctx = saturate_model { ctx with levels = IMap.map (fun (v, _, ubs) -> (v, 0, ubs)) ctx.levels }
 
   let append ctx' ctx =
-    let ns = Option.map (fun (ns, _) -> ns + 1) (IMap.max_binding_opt ctx.sorts) in
-    let nu = fst (IMap.max_binding ctx.levels) + 1 in
-    let ss, sorts = match ns with
-      | None -> IMap.empty, ctx.sorts
-      | Some ns ->
-        (IMap.mapi (fun n _ -> n + ns) ctx'.sorts,
-        IMap.fold (fun n (name, l, u, lbs, ubs) ->
-          IMap.add (n + ns) (name, l, u, ISet.map (fun n -> n + ns) lbs, ISet.map (fun n -> n + ns) ubs)) ctx'.sorts ctx.sorts) in
+    let _ = let (_, _, ubs) = IMap.find 0 ctx'.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
+    let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
+    let ns = Option.map_or 0 (fun (ns, _) -> ns + 1) (IMap.max_binding_opt ctx.sorts) in
+    let nu = fst (IMap.max_binding ctx.levels) in
+    let newsorts = List.init (IMap.cardinal ctx'.sorts) (fun i -> Sort.Var (ns + i)) in
+    let newunivs = List.init (fst (IMap.max_binding ctx'.levels)) (fun i -> Level.of_var (nu + i)) in
+    let ss = IMap.mapi (fun n _ -> n + ns) ctx'.sorts in
+    let sorts = IMap.fold (fun n (name, l, u, lbs, ubs) ->
+      IMap.add (n + ns) (name, l, u, ISet.map (fun n -> n + ns) lbs, ISet.map (fun n -> n + ns) ubs)) ctx'.sorts ctx.sorts in
     let su = IMap.mapi (fun n _ -> if n = 0 then 0 else n + nu) ctx'.levels in
 
     let (_, nm, _) = IMap.find 0 ctx.levels in
@@ -312,15 +325,16 @@ module Context = struct
     let levels = IMap.map (fun (v, m, ubs) -> (v, m + nmm - nm, ubs)) ctx.levels in
     let levels' = IMap.of_list (List.map (fun (n, (name, m, ubs)) ->
       let ubs = List.map (fun ub -> IMap.of_list (List.map (fun (v, n) -> ((if v = 0 then v else v + nu), n)) (IMap.to_list ub))) ubs in
-      ((if n = 0 then n else n + nu), (name, m - nmm - nm', ubs))
+      ((if n = 0 then n else n + nu), (name, m + nmm - nm', ubs))
     ) (IMap.to_list ctx'.levels)) in
     let levels = IMap.union (fun _ (nl, m, l) (_, _, r) -> Some (nl, m, l @ r)) levels levels' in
 
-    { sorts; levels }, (ss, su)
+    { sorts; levels }, ((newsorts, newunivs), (ss, su))
 
   (* Prunes the sort and level variables that do not appear in fs and fu respectively, returning
    * the substitutions to apply to terms from the input context. *)
   let keep_univs fs fu ctx =
+    let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> (not (IMap.mem 0 u)) || (not (IMap.cardinal u = 1)) || 0 <= IMap.find 0 u) ubs) in
     (* Ensuring that we keep 0. *)
     let fu = ISet.add 0 fu in
     (* We instantiate every sort variable outside of fs by its upper bound.
@@ -374,6 +388,7 @@ module Context = struct
   (* Prunes the sort and level variables that are provably equal to some other sort and levels, returning
    * the substitutions to apply to term from the input context. *)
   let optimize ctx =
+    let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
     (* We instatiate every sort variable which is provably equal to an explicit sort. *)
     let ctx, fs, ss = IMap.fold (fun s (_, l, u, _, _) (ctx, fs, ss) ->
       if l = u then (fst (instantiate_sort s ctx), fs, IMap.add s u ss) else (ctx, ISet.add s fs, IMap.add s (Sort.Var s) ss)
