@@ -57,31 +57,37 @@ let rec apply goal t ty ctx =
     apply goal (E.mkApp [ev] t) (E.beta ev ty) ctx
   | _ -> failwith "unreachable"
 
-let rec synthesize t =
+let parse_hint : (string -> t) ref = ref (fun _ -> assert false)
+
+let rec synthesize_goal goal =
+  (* Do not synthesze already instantiated evars. *)
+  let** t = EC.get_evar_body goal.Goal.goal in
+  if Option.is_some t then EC.Monad.ret () else
   let** debug = EC.get_flag_opt "debug-synthesis" in
-  let** () = if Option.is_some debug then let+* t = E.print t in print_endline ("synthesize " ^ t) else EC.Monad.iret () in
-  let** n = fun ctx -> match IMap.max_binding_opt ctx.E.evar with | None -> 0 | Some (i, _) -> i + 1 in
-  let* tg = E.typecheck t in
+  let** () = if Option.is_some debug then let+* g = Goal.print goal in print_endline ("synthesize " ^ g) else EC.Monad.iret () in
   let rec try_hints = function
     | [] -> fun ctx -> raise (Error (ctx, NoProgress))
-    | hint :: hints ->
-    let* ty = E.typecheck hint in fun ctx ->
-    try
-      let ctx, subgoals = apply t hint ty ctx in
-      let ctx, _ = EC.Monad.List.map (fun g ->
-        if g.Goal.goal < n then EC.Monad.ret () else
-        let** t = EC.get_evar_body g.Goal.goal in
-        if Option.is_some t then EC.Monad.ret () else
-        Goal.enter g synthesize) subgoals ctx in
-      ctx, ()
-    with | _ -> try_hints hints ctx in
-  let** hints = EC.get_hints tg in
+    | hint :: hints -> fun ctx -> try
+    let () = if Option.is_none debug then () else print_endline ("parse hint " ^ hint) in
+    let tac = !parse_hint hint in
+    let ctx, subgoals = exec tac goal ctx in
+    let ctx, _ = EC.Monad.List.map synthesize_goal subgoals ctx in
+    ctx, ()
+    with | E.TypeError _ -> try_hints hints ctx in
+  let* hints = Goal.enter goal (fun concl ->
+    let* ty = E.typecheck concl in
+    EC.Monad.to_mut (EC.get_hints ty)) in
+  let () = if Option.is_some debug then print_endline (string_of_int (List.length hints) ^ " hints") else () in
   try_hints hints
 
-let _ = E.synthesize := synthesize
+and synthesize_term t =
+  let** goals = Goal.collect_goals t in
+  let+ _ = EC.Monad.List.map synthesize_goal goals in
+  ()
 
-let rec exec tac goal =
-(*   let () = print_endline ("exec " ^ print tac) in *)
+and exec tac goal =
+  let** debug = EC.get_flag_opt "debug-tac" in
+  let () = if Option.is_none debug then () else print_endline ("exec " ^ print tac) in
   let ret = EC.Monad.ret in
   match tac with
   | Exact t ->
@@ -93,7 +99,9 @@ let rec exec tac goal =
       fun ctx -> raise E.(TypeError (ctx, NotGround t)))
   | Refine t ->
     Goal.enter goal (fun goal ->
+    let () = if Option.is_none debug then () else print_endline ("elaborate") in
     let* t = PC.Monad.to_engine (P.elaborate t) in
+    let () = if Option.is_none debug then () else print_endline ("instantiate") in
     let* () = E.instantiate_evar goal t in
     let** subgoals = Goal.collect_goals t in
     ret subgoals)
@@ -159,20 +167,20 @@ let rec exec tac goal =
       let f = E.of_hd (f.hd) in
       (* We find the proof. *)
       let* hd = E.fresh_const "RwRel" in
+      let* swap_rel = E.fresh_const "swap_rel" in
+      let* impl = E.fresh_const "impl" in
       let* u1 = EC.new_univ in
       let* u2 = EC.new_univ in
       let* u3 = EC.new_univ in
-      let* rwrel_evar = EC.new_evar ~ty:(Some { hd = hd.hd; args = [tyx; E.mkType u1; rwty; E.of_hd (Fun (false, [("T", E.mkType u2, None, false); ("U", E.mkType u3, None, false)], E.of_hd (Fun (true, [("_", E.mkVar 0, None, false)], E.mkVar 2)))); f; x; y] }) ~with_ctx:true in
-      let* () = fun ctx -> try !E.synthesize rwrel_evar ctx with _ -> raise (Error (ctx, NoRw rwty)) in
+      let* rwrel_evar = EC.new_evar ~ty:(Some { hd = hd.hd; args = [tyx; E.mkType u1; rwty; E.mkApp [E.mkType u2; E.mkType u3; impl] swap_rel; f; x; y] }) ~with_ctx:true in
+      let* () = fun ctx -> try synthesize_goal Goal.{ ctx = (List.map snd (IMap.to_list ctx.E.var)); goal = E.destEvar (E.of_hd rwrel_evar.hd) } ctx with E.TypeError _ -> raise (Error (ctx, NoRw rwty)) in
       let fy = E.{ hd = f.hd; args = [y] } in
       let** fy = E.whd ~flags:{ E.whd_flags_none with beta = true; steps = Some 1 } fy in
       let* ry = EC.new_evar ~ty:(Some fy) ~with_ctx:true in
       let* () = E.instantiate_evar concl (E.mkApp [rw; ry] rwrel_evar) in
       let** subgoals = Goal.collect_goals ry in
       EC.Monad.ret subgoals)
-  | Auto -> Goal.enter goal (fun concl ->
-    let* () = !E.synthesize concl in
-    EC.Monad.to_mut (Goal.collect_goals concl))
+  | Auto -> let+ _ = synthesize_goal goal in []
   | Seq [] -> ret [goal]
   | Seq (tac :: tacs) ->
 (*     let () = print_endline ("seq") in *)
@@ -180,19 +188,4 @@ let rec exec tac goal =
     let+ subgoals = EC.Monad.List.map (fun g -> let** t = EC.get_evar_body (g.Goal.goal) in if t = None then exec (Seq tacs) g else ret []) subgoals in
     List.concat subgoals
 
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-  
+let _ = E.synthesize := synthesize_term

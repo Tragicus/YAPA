@@ -17,6 +17,8 @@
 %right TARROW
 
 %start <Commands.t list> toplevel
+%start <Tactic.t> toptactic
+%start <Term.t> topterm
 %type <Term.t> term
 %type <Term.t list> constructors
 %type <Term.t> sterm
@@ -50,11 +52,14 @@ toplevel:
   | EVAL; term; DOT { Commands.Eval $2 }
   | QED; DOT { Commands.Qed false }
   | DEFINED; DOT { Commands.Qed true }
-  | HINT; term; FOR; term; DOT { Commands.Hint ($4, $2) }
+  | HINT; STRING; FOR; term; DOT { Commands.Hint ($4, $2) }
   | SET; STRING; COLONEQ; STRING; DOT { Commands.Set ($2, $4) }
   | UNSET; STRING; DOT { Commands.Unset $2 }
   | STOP; DOT { Commands.Stop }
   | tac; DOT { Commands.Tac $1 }
+
+toptactic:
+  | tac; DOT { $1 }
 
 tac:
   | separated_list(SCOLON, tac_atom) { match $1 with | [] -> failwith "unreachable" | [t] -> t | l -> Tactic.Seq l }
@@ -78,6 +83,9 @@ body_annotation:
 
 match_return:
   | RETURN; term {$2}
+
+topterm:
+  | term; EOF { $1 }
 
 term:
   | FUN; telescope; ARROW; term { Term.mkFun $2 $4 }

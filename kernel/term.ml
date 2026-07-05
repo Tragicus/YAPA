@@ -252,7 +252,7 @@ let print ?(debug=false) t =
     | Const (c, s, u) -> ret (c + "@{" + String.concat ", " (List.map Univ.Sort.print s) + ";" + String.concat ", " (List.map Univ.Level.print u) + "}", true)
     | Fun (forall, (v, ty, Some t, _) :: tele, body) -> let+ (body, _) = if List.is_empty tele then ret body else fold_hd (Fun (forall, tele, body)) in ("let " + v + " : " + (fst ty) + " := " + (fst t) + " in " + body, false)
     | Fun (forall, tele, body) -> ret ((if forall then "forall " else "fun ") + String.concat " " (List.map (fun (v, ty, t, impl) ->
-          (if impl then "{" else "(") + v + " : " + fst ty + (match t with | None -> "" | Some t -> " := " + fst t) + (if impl then "{" else ")")
+          (if impl then "{" else "(") + v + " : " + fst ty + (match t with | None -> "" | Some t -> " := " + fst t) + (if impl then "}" else ")")
       ) tele) + (if forall then ", " else " => ") + fst body, false)
     | Type u -> ret (Univ.print u, true)
     | Ind (v, a, c) -> ret ("ind " + v + " : " + fst a + " :=" + " | " + String.concat " | " (List.map fst c), false)

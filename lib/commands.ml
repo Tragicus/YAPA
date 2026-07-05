@@ -12,7 +12,7 @@ type t =
   | Define of string * (string list * string list) option * P.t * P.t
   | Tac of Tactic.t
   | Qed of bool
-  | Hint of P.t (* pat *) * P.t (* hint *)
+  | Hint of P.t (* pat *) * string (* hint *)
   | Skip
   | Set of string (* flag *) * string (* value *)
   | Unset of string (* flag *)
@@ -62,7 +62,7 @@ let print cmd =
   | Define (c, su, ty, t) -> "Definition " + Term.print (Term.mkConst c (Option.map (fun (s, u) -> s, List.map (fun u -> SMap.singleton u 0) u) su)) + " : " + Term.print ty + " := " + Term.print t
   | Tac tac -> Tactic.print tac
   | Qed b -> if b then "Defined" else "Qed"
-  | Hint (pat, hint) -> "Hint " + Term.print hint + " for " + Term.print pat
+  | Hint (pat, hint) -> "Hint " + hint + " for " + Term.print pat
   | Skip -> "Skip"
   | Set (flag, value) -> "Set " + flag + " := " + value
   | Unset flag -> "Unset " + flag
@@ -116,10 +116,8 @@ let eval cmd : unit Context.Monad.t =
     let ctx, () = EC.push_const v (ty, if transparent then Some t else None) ctx in
     (EC.reset ctx, Idle), ())
   | Hint (pat, hint) ->
-    let* pat = Context.Monad.of_engine (PC.Monad.to_engine (P.elaborate pat)) in
+    let* pat = Context.Monad.of_engine (PC.Monad.to_engine (P.elaborate ~evars_with_ctx:false pat)) in
     let* pat = Context.Monad.of_engine (EC.Monad.to_mut (E.to_pattern pat)) in 
-    let* hint = Context.Monad.of_engine (PC.Monad.to_engine (P.elaborate hint)) in
-    let* hint = Context.Monad.of_engine (EC.Monad.to_mut (E.to_kernel hint)) in
     fun (ctx, status) -> ({ ctx with hints = Engine.Pattern.Map.add pat hint ctx.hints }, status), ()
   | Whd t ->
     let** ctx = fun (ctx, _) -> ctx in

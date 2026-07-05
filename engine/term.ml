@@ -36,7 +36,7 @@ type context = {
   var : t binder IMap.t;
   const : (Kernel.Univ.Context.t * Kernel.Term.t * Kernel.Term.t option) SMap.t;
   evar : (t * t option * (t binder IMap.t * t * t) list) IMap.t;
-  hints : Kernel.Term.term Pattern.Map.t;
+  hints : string Pattern.Map.t;
   flags : string SMap.t
 }
 
@@ -321,8 +321,12 @@ end
 
 let fresh_const c =
   let** cuniv = Context_.get_const_univ c in
-  let+ ((s, u), _) = Context_.new_univs_with_constraints cuniv in
-  mkConst c s u
+  let* ((s, u), _) = Context_.new_univs_with_constraints cuniv in
+  let** () = fun ctx ->
+    match u with
+    | [] -> ()
+    | u -> assert (fst (IMap.max_binding (List.hd (List.rev u))) = fst (IMap.max_binding ctx.univ.levels)) in
+  Context_.Monad.ret (mkConst c s u)
 
 let rec fold ?(avoid_capture=true) ?(keep_evars=false) fold_hd fold_app t =
   let fold = fold ~avoid_capture ~keep_evars fold_hd fold_app in
@@ -362,7 +366,7 @@ let print ?(keep_evars=false) ?(debug=false) t =
     | Construct (ind, id) -> ret ("ind.mk(" + fst ind + ")." + string_of_int id, true)
     | Case (ind, recursive) -> ret ((if recursive then "ind.fix(" else "ind.case(") + fst ind + ")", true)
     | Evar i -> ret ("?" + string_of_int i, true) in
-  let+* (t, _) = Context_.Monad.to_imut (fold ~avoid_capture:false ~keep_evars fold_hd
+  let+* (t, _) = Context_.Monad.to_imut (fold ~keep_evars fold_hd
     (function
       | [hd] -> ret hd
       | args -> ret (String.concat " " (List.map (fun (t, atomic) -> if atomic then t else "(" + t + ")") args), false)) t) in
@@ -498,8 +502,7 @@ let to_pattern t =
 
 let get_hints t ctx =
   let t = to_pattern t ctx in
-  let hints = Pattern.Map.find_all ctx.hints t in
-  List.map of_kernel hints
+  Pattern.Map.find_all ctx.hints t
 
 type cumulativity = Conv | Cumul | Cocumul
 let swap_cumulativity = function
@@ -687,7 +690,7 @@ and whd ?(flags=whd_flags_all) t =
 (* Splits `forall x1 ... xk, ty` into `[x1; ...; xn], forall x(n+1) ... xk, ty`. If `n` is None, takes the longest list possible. *)
 (* TODO: This is in quadratic time, I may be able to optimize by taking care of the zeta-redexes by hand. *)
 and destArity ?(whd_rty=false) ?(keep_let=false) ?(until=Max) ?(count_implicits=true) ?(trailing_implicits=false) (t : t) : (t telescope * t) Context_.Monad.t =
-  let** debug = Context_.get_flag_opt "debug-synthesis" in
+  let** debug = Context_.get_flag_opt "debug-typecheck" in
   let** () = if Option.is_some debug then let+* t = print t in print_endline ("destArity " ^ (match until with | Max -> "= oo" | Exact n -> "= " ^ string_of_int n | AtMost n -> "<= " ^ string_of_int n) ^ " " ^ t) else Context_.Monad.iret () in
   let ret = Context_.Monad.ret in
   let flags = { whd_flags_all with zeta = not keep_let } in
@@ -760,12 +763,11 @@ and instantiate_evar { hd = ev; args } t =
   let** d = Context_.depth in
   let pbevars = ref (ISet.singleton i) in
   let evarsty = ref IMap.empty in
-  (* Getting rid of the variables that are not in `args`. *)
-  let* t = rm_problematic_term ~instantiate_evars:true (fun t ->
+  let pb t =
     let** d' = Context_.depth in
     match t.hd with
     | Var v when d' <= v -> fun ctx -> raise (TypeError (ctx, UnboundVar (v - d')))
-    | Var v when d' - d <= v -> iret (Option.is_none (IMap.find_opt (v - (d' - d)) map))
+    | Var v when d' - d <= v -> iret (not (IMap.mem (v - (d' - d)) map))
     (* Avoiding instantiation loops. *)
     | Evar j when ISet.mem j !pbevars -> iret true
     (* Avoiding loops in evar's types. *)
@@ -779,11 +781,13 @@ and instantiate_evar { hd = ev; args } t =
       (match ty with
       | None -> let () = pbevars := ISet.add j !pbevars in iret true
       | Some ty -> let () = evarsty := IMap.add j ty !evarsty in iret false)
-    | _ -> iret false
-  ) t in
+    | _ -> iret false in
+  (* Getting rid of the variables that are not in `args`. *)
+  let* t = rm_problematic_term ~instantiate_evars:true pb t in
   match t with
   | None -> fun ctx -> raise (TypeError (ctx, OccurCheck ({ hd = ev; args }, t')))
   | Some t ->
+  let* _ = fold ~avoid_capture:false (fun h -> let h = of_hd h in let** b = pb h in let () = assert (not b) in Context_.Monad.ret h) (function | [] -> failwith "unreachable" | hd :: args -> Context_.Monad.ret (mkApp args hd)) t in
   (* Getting rid of the variables that cause the instantiation to be higher-order. *)
   let* t = rm_problematic_term (fun t ->
     let** d' = Context_.depth in
@@ -896,7 +900,13 @@ and instantiate_evar { hd = ev; args } t =
 
 and unify ?(cumulative=Conv) t1 t2 =
   let timestamp = timestamp () in let _ = timestamp in
+  let** debug = Context_.get_flag_opt "debug-unification" in
+  let debug = Option.is_some debug in
   let ret = Context_.Monad.ret in
+
+  (* Removing reducible evars in head position. *)
+  let** t1 = whd ~flags:whd_flags_none t1 in
+  let** t2 = whd ~flags:whd_flags_none t2 in
 
   (* Boolean combinators that restore the initial context when they return false. *)
   let (&&) state f = fun ctx ->
@@ -921,8 +931,11 @@ and unify ?(cumulative=Conv) t1 t2 =
       (if cumulative = Cocumul then ret true else (fun ctx -> try Context_.Monad.List.for_all2 (fun u u' -> let+ () = Context_.add_level_constraint u u' in true) u u' ctx with Kernel.Univ.UnivError (univ, _) -> { ctx with univ }, false)) &&
       (if cumulative = Cumul then ret true else (fun ctx -> try Context_.Monad.List.for_all2 (fun u u' -> let+ () = Context_.add_level_constraint u u' in true) u' u ctx with Kernel.Univ.UnivError (univ, _) -> { ctx with univ }, false))
     | Type u, Type u' -> 
-      (if cumulative = Cocumul then ret true else (fun ctx -> try (let+ () = Context_.add_univ_constraint u u' in true) ctx with Kernel.Univ.UnivError (univ, _) -> { ctx with univ }, false)) &&
-      (if cumulative = Cumul then ret true else (fun ctx -> try (let+ () = Context_.add_univ_constraint u' u in true) ctx with Kernel.Univ.UnivError (univ, _) -> { ctx with univ }, false))
+      let* r = (if cumulative = Cocumul then ret true else (fun ctx -> try (let+ () = Context_.add_univ_constraint u u' in true) ctx with Kernel.Univ.UnivError (univ, _) -> { ctx with univ }, false)) &&
+      (if cumulative = Cumul then ret true else (fun ctx -> try (let+ () = Context_.add_univ_constraint u' u in true) ctx with Kernel.Univ.UnivError (univ, _) -> { ctx with univ }, false)) in
+      let** () = if r then Context_.Monad.iret () else if not debug then Context_.Monad.iret () else fun ctx ->
+        print_endline (Kernel.Univ.Context.print ctx.univ) in
+      ret r
     | Fun (f, (v, ty, t, impl) :: tele, body), Fun (f', (_, ty', t', _) :: tele', body') ->
       ret (f = f') &&
       unify ty ty' &&
@@ -938,7 +951,7 @@ and unify ?(cumulative=Conv) t1 t2 =
     | Case (ind, r), Case (ind', r') ->
       ret (r = r') && unify ind ind'
     | _, _ -> ret false) &&
-    (ret (List.length t1.args = List.length t2.args)) &&
+    ret (List.length t1.args = List.length t2.args) &&
     Context_.Monad.List.for_all2 unify t1.args t2.args in
 
   let whd t =
@@ -949,8 +962,6 @@ and unify ?(cumulative=Conv) t1 t2 =
     if progress then Some t else None in
 
   let rec aux ~cumulative o1 o2 t1 t2 =
-     let** debug = Context_.get_flag_opt "debug-unification" in
-     let debug = Option.is_some debug in
      let** () =
        if not debug then Context_.Monad.iret () else
        let** t1 = print t1 in
@@ -973,7 +984,7 @@ and unify ?(cumulative=Conv) t1 t2 =
       (try let ctx, () = instantiate_evar t1 o2 ctx in ctx, true
       with | TypeError (_, (HO (_, _))) | TypeError (_, (OccurCheck (_, _))) ->
         (try let ctx, () = instantiate_evar t2 o1 ctx in ctx, true
-        with | TypeError (_, (HO (_, _))) | TypeError (_, (OccurCheck  (_, _))) ->
+        with | TypeError (_, (HO (_, _))) ->
           let ctx, () = Context_.add_evar_constraint t1 o2 ctx in
           let ctx, () = Context_.add_evar_constraint t2 o1 ctx in
           ctx, true
@@ -981,19 +992,21 @@ and unify ?(cumulative=Conv) t1 t2 =
       | TypeError (_, _) -> ctx, false)
     | Evar _, _ -> fun ctx -> 
       (try let ctx, () = instantiate_evar t1 o2 ctx in ctx, true
-      with | TypeError (_, (HO (_, _))) | TypeError (_, (OccurCheck (_, _))) ->
+      with | TypeError (_, (HO (_, _))) ->
         let ctx, () = Context_.add_evar_constraint t1 o2 ctx in
         ctx, true
       | TypeError (_, _) -> ctx, false)
     | _, Evar _ -> fun ctx ->
       (try let ctx, () = instantiate_evar t2 o1 ctx in ctx, true
-      with | TypeError (_, (HO (_, _))) | TypeError (_, (OccurCheck (_, _))) ->
+      with | TypeError (_, (HO (_, _))) ->
         let ctx, () = Context_.add_evar_constraint t2 o1 ctx in
         ctx, true
       | TypeError (_, _) -> ctx, false)
     | _, _ -> ret false
   ) in
-  aux ~cumulative t1 t2 t1 t2
+  let+ r = aux ~cumulative t1 t2 t1 t2 in
+  let () = if not debug then () else print_endline (timestamp ^ ": unification " ^ (if r then "succeeds" else "fails")) in
+  r
 
 and safe_dest_type t =
   let** t = whd t in
@@ -1203,51 +1216,97 @@ and rm_problematic_term ?(instantiate_evars=false) pb t =
     let* args = Context_.Monad.List.map aux t.args in
     fold_app hd args
   and fold_app hd args =
+    let timestamp = timestamp () in let _ = timestamp in
+    let** debug = Context_.get_flag_opt "debug-rm_pb_term" in
+    let debug = Option.is_some debug in
     let rhd = fold_hd hd in
+    let** () = if not debug then Context_.Monad.iret () else let+* t = print (mkApp (List.map collapse_either args) (collapse_either rhd)) in print_endline (timestamp ^ ": input is " ^ t) in
     let** r =
-      if List.exists Either.is_right args then Context_.Monad.iret None else
       match rhd with | Either.Right _ -> Context_.Monad.iret None | Either.Left hd ->
+      if List.exists Either.is_right args then Context_.Monad.iret None else
       let t = mkApp (List.map (Either.fold ~left:(fun t -> t) ~right:(fun _ -> failwith "unreachable")) args) hd in
       let+* b = pb t in
       if b then None else Some t in
     match r with | Some t -> Context_.Monad.ret (Either.Left t) | None ->
+    let () = if not debug then () else print_endline (timestamp ^ ": problematic term detected") in
     (* Length of the longest prefix of args that ends in `Either.Right. *)
     let npb = List.length args - List.length (List.take_while Either.is_left (List.rev args)) in
-    match hd with
-    | Fun (false, tele, body) ->
-      let ntele =
-        if Either.is_right body then List.length tele else
-        List.length tele - List.length (List.take_while (fun (_, ty, t, _) -> Either.is_left ty && Option.map_or true Either.is_left t) (List.rev tele)) in
-      (* If no subterm is problematic, we still want to do a beta-reduction. *)
-      let n = min (List.length tele) (max 1 (max npb ntele)) in
-      let rhd = collapse_either rhd in
-      (* If I need to reduce more than I have arguments, there will remain problematic terms after reduction. *)
-      if List.length args < n then Context_.Monad.ret (Either.Right (mkApp (List.map collapse_either args) rhd)) else
-      let tele, body = match rhd.hd with | Fun (_, tele, body) -> tele, body | _ -> failwith "unreachable" in
-      let tele = List.drop n tele in
-      let args, rest = List.split_at n args in
-      let args = IMap.of_list (List.mapi (fun i t -> (i, collapse_either t)) (List.rev args)) in
-      let t = subst (fun i -> try IMap.find i args with _ -> mkVar (i - n)) (mkFun tele body) in
+    let+ r = match hd with
+    | Fun (false, tele, body) when npb <> 0 ->
+        let () = if not debug then () else print_endline (timestamp ^ ": eat arguments") in
+      let args, rest = List.split_at npb args in
+      let rec loop i map revtele = function
+        | [], tele -> i, map, tele, revtele
+        | _, [] -> raise Not_found
+        | args, (v, ty, Some t, impl) :: tele ->
+          let ty, t =
+            let map = List.map (fun (j, t) -> (i - j - 1, t)) map in
+            let map = IMap.of_list map in
+            subst (fun i -> try IMap.find i map with _ -> mkVar i) (collapse_either ty),
+            subst (fun i -> try IMap.find i map with _ -> mkVar i) (collapse_either t) in
+          loop (i + 1) map ((v, ty, Some t, impl) :: revtele) (args, tele)
+        | arg :: args, _ :: tele -> loop (i + 1) ((i, collapse_either arg) :: map) revtele (args, tele) in
+        let () = if not debug then () else print_endline (timestamp ^ ": start loop") in
+      let i, map, tele, revtele = try loop 0 [] [] (args, tele) with Not_found -> 0, [], [], [] in
+        let () = if not debug then () else print_endline (timestamp ^ ": end loop") in
+      (* Ugly encoding for the case where there was an exeption catched in the line above. *)
+      if List.is_empty map then Context_.Monad.ret (Either.Right (mkApp (List.map collapse_either args) (collapse_either rhd))) else
+      let map = List.map (fun (j, t) -> (i - j - 1, t)) map in
+      let map = IMap.of_list map in
+      let tele = List.map (fun (v, ty, t, impl) -> (v, collapse_either ty, Option.map collapse_either t, impl)) tele in
+      let body = collapse_either body in
+      let t = subst (fun i -> try IMap.find i map with _ -> mkVar i) (mkFun tele body) in
+      let t = mkFun (List.rev revtele) t in
       let* hd = Context_.Monad.Head.map aux t.hd in
       let* args = Context_.Monad.List.map aux t.args in
       fold_app hd (args @ rest)
+    | Fun (_, (_, ty, t, _) :: _, _) when Either.is_right ty || Option.map_or false Either.is_right t ->
+      let () = if not debug then () else print_endline (timestamp ^ ": eat hd") in
+      let rhd = collapse_either rhd in
+      let args = List.map collapse_either args in
+      let t = mkApp args rhd in
+      let** t' = whd_opt ~flags:{ whd_flags_all with steps = Some 1 } t in
+      (match t' with
+      | None -> ret (Either.right t)
+      | Some t -> aux t)
+    | Fun (f, tele, body) ->
+        let () = if not debug then () else print_endline (timestamp ^ ": whd") in
+      let b, tele = List.uncons (List.map (fun (v, ty, t, impl) -> (v, collapse_either ty, Option.map collapse_either t, impl)) tele) in
+      let body = collapse_either body in
+      let t = mkForallOrFun f tele body in
+      let* t = Context_.with_var ~avoid_capture:false b (aux t) in
+      let args = List.map collapse_either args in
+      (match t with
+      | Either.Left t -> ret (Either.left (mkApp args (mkForallOrFun f [b] t)))
+      | Either.Right _ ->
+      let rhd = collapse_either rhd in
+      let t = mkApp args rhd in
+      let** t' = whd_opt ~flags:{ whd_flags_all with steps = Some 1 } t in
+      match t' with
+      | None -> ret (Either.right t)
+      | Some t -> aux t)
     | Evar i ->
       let** t = Context_.get_evar_body i in
       (match t with
       | Some t ->
+        let** () = if not debug then Context_.Monad.iret () else let+* t = print t in print_endline (timestamp ^ ": unfoldable evar = " ^ t) in
         (* TOTHINK: Do I want to reduce all the lambdas in `t` as usual? *)
         let* hd = Context_.Monad.Head.map aux t.hd in
         let* targs = Context_.Monad.List.map aux t.args in
         fold_app hd (targs @ args)
       | None ->
+        let () = if not debug then () else print_endline (timestamp ^ ": rigid evar") in
         if not instantiate_evars then ret (Either.Right { hd = Evar i; args = List.map collapse_either args }) else
         let sargs = ISet.of_list (List.fold_left (fun args (i, x) -> if Either.is_left x then args else i :: args) [] (List.mapi (fun i x -> (i, x)) args)) in
         if ISet.is_empty sargs then ret (Either.Right { hd = Evar i; args = List.map collapse_either args }) else
         let* _ = prune_evar sargs i in
         fold_app hd args)
     | _ ->
+      let () = if not debug then () else print_endline (timestamp ^ ": no simplification") in
       let rhd = collapse_either rhd in
       ret (Either.Right (mkApp (List.map collapse_either args) rhd)) in
+    let () = if not debug then () else print_endline (timestamp ^ (if Either.is_left r then ": success" else ": failure")) in
+    r in
   let+ t = aux t in
   Either.fold ~left:Option.some ~right:(fun _ -> None) t
 
@@ -1308,9 +1367,9 @@ let pattern pats t =
   let* () = Context_.push_telescope ~avoid_capture:false tys in
   let pats' = List.map (bump (List.length pats)) (List.rev pats) in
   let t = bump (List.length pats) t in
-  let eq_pat pat pat' =
+  let eq_pat k pat pat' =
     match pat.hd, pat'.hd with
-    | Var v, Var v' -> (v = v')
+    | Var v, Var v' -> (v + k = v')
     | Const (c, _, _), Const (c', _, _) -> (c = c')
     (* TODO: Do I want to be more precise? *)
     | Fun (f, _, _), Fun (f', _, _) -> (f = f')
@@ -1320,37 +1379,37 @@ let pattern pats t =
     (* TODO: Do I want to reduce? *)
     | Evar i, Evar i' -> (i = i')
     | _, _ -> false in
-  let rec compile t =
+  let rec compile k t =
     let** t = whd ~flags:whd_flags_none t in
     let rec try_pat i = function | [] -> ret None | pat :: pats ->
-      if not (eq_pat pat t) then try_pat (i + 1) pats else
-      let* b = unify pat t in
+      if not (eq_pat k pat t) then try_pat (i + 1) pats else
+      let* b = unify (bump k pat) t in
       if not b then try_pat (i + 1) pats else
-      ret (Some (mkVar i)) in
+      ret (Some (mkVar (i + k))) in
     let* r = try_pat 0 pats' in
     match r with | Some r -> ret r | None ->
     let* hd = match t.hd with
     | Var _ | Const (_, _, _) | Type _ | Evar _ -> ret t.hd
     | Fun (f, tele, body) ->
-      Context_.fold_telescope ~avoid_capture:false (fun rtele (v, ty, t, impl) ->
-        let* ty = compile ty in
-        let+ t = Context_.Monad.Option.map compile t in
-        (v, ty, t, impl) :: rtele) [] tele (fun rtele ->
-        let+ body = compile body in
+      Context_.fold_telescope ~avoid_capture:false (fun (k, rtele) (v, ty, t, impl) ->
+        let* ty = compile k ty in
+        let+ t = Context_.Monad.Option.map (compile k) t in
+        (k + 1, (v, ty, t, impl) :: rtele)) (k, []) tele (fun (k, rtele) ->
+        let+ body = compile k body in
         Fun (f, List.rev rtele, body))
     | Ind (v, a, c) ->
-      let* a = compile a in
-      let+ c = Context_.with_var ~avoid_capture:false (v, a, None, false) (Context_.Monad.List.map compile c) in
+      let* a = compile k a in
+      let+ c = Context_.with_var ~avoid_capture:false (v, a, None, false) (Context_.Monad.List.map (compile (k + 1)) c) in
       Ind (v, a, c)
     | Construct (ind, i) ->
-      let+ ind = compile ind in
+      let+ ind = compile k ind in
       Construct (ind, i)
     | Case (ind, r) ->
-      let+ ind = compile ind in
+      let+ ind = compile k ind in
       Case (ind, r) in
-    let+ args = Context_.Monad.List.map compile t.args in
+    let+ args = Context_.Monad.List.map (compile k) t.args in
     { hd; args } in
-  let* t = compile t in
+  let* t = compile 0 t in
   let* _ = Context_.Monad.List.map (fun _ -> Context_.pop_var) (List.init (List.length tys) (fun i -> i)) in
   let t = mkFun tys t in
   let+ _ = typecheck t in

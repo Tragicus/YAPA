@@ -209,7 +209,7 @@ type error =
 
 exception Error of Context.t * error
 
-let rec elaborate (t : t) =
+let rec elaborate ?(evars_with_ctx=true) (t : t) =
   let ret = Context.Monad.ret in
   let sort = function
     | "Type" -> ret Kernel.Univ.Sort.Type
@@ -244,24 +244,24 @@ let rec elaborate (t : t) =
         E.of_hd (E.Const (c, s', u')))
     | Fun (f, tele, body) -> fun ctx ->
       let rec telescope rtele = function
-        | [] -> let+ body = elaborate body in rtele, body 
+        | [] -> let+ body = elaborate ~evars_with_ctx body in rtele, body 
         | (v, ty, t, impl) :: tele ->
-          let* ty = elaborate ty in
-          let* t = Context.Monad.Option.map elaborate t in
+          let* ty = elaborate ~evars_with_ctx ty in
+          let* t = Context.Monad.Option.map (elaborate ~evars_with_ctx) t in
           let* () = Context.push_var ~avoid_capture:false (v, ty, t, impl) in
           telescope ((v, ty, t, impl) :: rtele) tele in
       let (ctx', (rtele, body)) = telescope [] tele ctx in
       let ctx' = { ctx' with var = ctx.var; ctx = { ctx'.ctx with var = ctx.ctx.var } } in
       ctx', E.of_hd (E.Fun (f, List.rev rtele, body))
     | Ind (v, a, c) ->
-      let* a = elaborate a in
-      let+ c = Context.with_var ~avoid_capture:false (v, a, None, false) (Context.Monad.List.map elaborate c) in
+      let* a = elaborate ~evars_with_ctx a in
+      let+ c = Context.with_var ~avoid_capture:false (v, a, None, false) (Context.Monad.List.map (elaborate ~evars_with_ctx) c) in
       E.of_hd (E.Ind (v, a, c))
-    | Construct (ind, i) -> let+ ind = elaborate ind in E.of_hd (E.Construct (ind, i))
+    | Construct (ind, i) -> let+ ind = elaborate ~evars_with_ctx ind in E.of_hd (E.Construct (ind, i))
     | Case (r, s, ind, rty, br) ->
-      let* s = elaborate s in
-      let* ind' = match ind with | None -> Context.Monad.of_engine (E.typecheck s) | Some ind -> elaborate ind in
-      let* rty = elaborate rty in
+      let* s = elaborate ~evars_with_ctx s in
+      let* ind' = match ind with | None -> Context.Monad.of_engine (E.typecheck s) | Some ind -> elaborate ~evars_with_ctx ind in
+      let* rty = elaborate ~evars_with_ctx rty in
       let* whind = Context.Monad.of_engine (EC.Monad.to_mut (E.whd ind')) in
       let ind = E.of_hd whind.hd in
       let* (_, a, cs) = Context.Monad.of_engine (fun ctx -> try ctx, E.destInd ind with Not_found -> raise (E.TypeError (ctx, E.IllFormed ind'))) in
@@ -269,7 +269,7 @@ let rec elaborate (t : t) =
       let* () = Context.push_var ~avoid_capture:false ("_", a, Some ind, false) in
       let* br = Context.Monad.List.map (fun (c, r) ->
         let (c, cargs) = safe_dest_app c in
-        let* chd = elaborate c in
+        let* chd = elaborate ~evars_with_ctx c in
         let* chd = Context.Monad.of_engine (EC.Monad.to_mut (E.whd chd)) in
         let** (ind', i) = fun ctx -> try E.destConstruct chd with _ -> let () = print_endline ("not a constructor: " ^ E.print chd ctx.Context.ctx) in raise (Error (ctx, IllegalBranch (c, r))) in
         let* b = Context.Monad.of_engine (E.unify (E.bump 1 ind) ind') in
@@ -283,7 +283,7 @@ let rec elaborate (t : t) =
           if su <> None then let () = print_endline "argument should not be a constant" in raise (Error (ctx, IllegalBranch (c, r))) else
           ctx, (v, ty, t, impl)) (List.combine cargs ctele) in
         let* _ = Context.Monad.List.fold_left (fun (v, _, _, _) vs ctx -> if SSet.mem v vs then let () = print_endline "variable bound several times" in raise (Error (ctx, IllegalBranch (c, r))) else ctx, SSet.add v vs) tele SSet.empty in
-        let* r = Context.with_telescope ~avoid_capture:false tele (elaborate r) in
+        let* r = Context.with_telescope ~avoid_capture:false tele (elaborate ~evars_with_ctx r) in
         let r = E.beta ind (E.mkFun tele r) in
         Context.Monad.ret (i, r)
       ) br in
@@ -293,13 +293,13 @@ let rec elaborate (t : t) =
       let+ br = fun ctx -> ctx, List.mapi (fun i (j, br) -> if i <> j then raise (Error (ctx, MissingBranch i)) else br) (IMap.to_list br) in
       E.{hd = E.Case (ind, r); args = rty :: br @ whind.args @ [s] }
     | Evar s ->
-        if s = "_" then Context.Monad.of_engine (EC.new_evar ~with_ctx:true) else
+        if s = "_" then Context.Monad.of_engine (EC.new_evar ~with_ctx:evars_with_ctx) else
         (fun ctx -> try ctx, E.of_hd (E.Evar (SMap.find s ctx.evar)) with _ ->
-          let ctx, t = Context.Monad.of_engine (EC.new_evar ~with_ctx:true) ctx in
+          let ctx, t = Context.Monad.of_engine (EC.new_evar ~with_ctx:evars_with_ctx) ctx in
           let i = E.destEvar (E.of_hd t.hd) in
           { ctx with evar = SMap.add s i ctx.evar }, t)
-    | App _ -> elaborate hd in
-  let* args = Context.Monad.List.map elaborate args in
+    | App _ -> elaborate ~evars_with_ctx hd in
+  let* args = Context.Monad.List.map (elaborate ~evars_with_ctx) args in
   if not impl then Context.Monad.ret (E.mkApp args hd) else
   let* ty = Context.Monad.of_engine (E.typecheck hd) in
   let* tele, ty = Context.Monad.of_engine (E.destArity ~until:(Exact (List.length args)) ~count_implicits:false ~trailing_implicits:false ty) in
@@ -314,7 +314,7 @@ let rec elaborate (t : t) =
     let open EC.Monad.Notations in
     let ret = EC.Monad.ret in
     match tele with | [] -> ret rargs | (_, ty, _, impl) :: tele ->
-    let* arg = if impl then EC.new_evar ~ty:(Some (subst ty)) ~with_ctx:true else ret (List.hd args) in
+    let* arg = if impl then EC.new_evar ~ty:(Some (subst ty)) ~with_ctx:evars_with_ctx else ret (List.hd args) in
     let args = if impl then args else List.tl args in
     let () = Dynarray.add_last args' arg in
     loop (arg :: rargs) args tele in
@@ -324,8 +324,8 @@ let rec elaborate (t : t) =
   if not impl then Context.Monad.ret t else
   let* () = Context.Monad.of_engine (EC.push_telescope ~avoid_capture:false tele) in
   let* tele', _ = Context.Monad.of_engine (E.destArity ~until:(Exact 0) ~count_implicits:false ~trailing_implicits:true ty) in
-  let* rargs = Context.Monad.of_engine (loop [] [] tele') in
-  let+ _ = Context.Monad.of_engine (EC.Monad.List.map (fun _ -> EC.pop_var) (List.init (List.length tele) (fun i -> i))) in
+  let* _ = Context.Monad.of_engine (EC.Monad.List.map (fun _ -> EC.pop_var) (List.init (List.length tele) (fun i -> i))) in
+  let+ rargs = Context.Monad.of_engine (loop [] [] tele') in
   E.mkApp (List.rev rargs) t
 
 

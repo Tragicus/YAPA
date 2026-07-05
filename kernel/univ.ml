@@ -155,9 +155,8 @@ module Context = struct
       let (n, ls, us, lb, ub) = get s ctx in
       if us <= u then ctx, seen else
       ISet.fold (fun s (ctx, seen) -> propagate_down seen u s ctx) lb ({ ctx with sorts = IMap.add s (n, ls, u, lb, ub) ctx.sorts }, ISet.add s seen) in
-    let open Sort in
-    match s1, s2 with
-    | Var s1, Var s2 -> 
+    try match s1, s2 with
+    | Sort.Var s1, Sort.Var s2 -> 
       let (_, l1, _, _, _) = get s1 ctx in
       let (_, _, u2, _, _) = get s2 ctx in
       if u2 < l1 then raise (UnivError (ctx, SortInconsistency (u2, l1))) else
@@ -165,12 +164,12 @@ module Context = struct
       let ctx = { ctx with sorts = IMap.update s2 (Option.map (fun (n, l, s, lb, ub) -> (n, l, s, ISet.add s1 lb, ub))) ctx.sorts } in
       let ctx, _ = propagate_up ISet.empty l1 s2 ctx in
       fst (propagate_down ISet.empty u2 s1 ctx), ()
-    | Var s1, s2 ->
+    | Sort.Var s1, s2 ->
       let (_, l1, u1, _, _) = get s1 ctx in
       if s2 < l1 then raise (UnivError (ctx, SortInconsistency (s2, l1))) else
       let ctx, _ = propagate_down ISet.empty u1 s1 ctx in
       ctx, ()
-    | s1, Var s2 ->
+    | s1, Sort.Var s2 ->
       let (_, l2, u2, _, _) = get s2 ctx in
       if u2 < s1 then raise (UnivError (ctx, SortInconsistency (u2, s1))) else
       let ctx, _ = propagate_up ISet.empty l2 s2 ctx in
@@ -178,6 +177,9 @@ module Context = struct
     | s1, s2 ->
       if s2 < s1 then raise (UnivError (ctx, SortInconsistency (s2, s1))) else
       ctx, ()
+    with e ->
+      let () = print_endline ("inconsistent sort constraint " ^ Sort.print s1 ^ " <= " ^ Sort.print s2 ^ " in\n" ^ print ctx) in
+      raise e
 
   exception Loop of ISet.t
 
@@ -243,7 +245,9 @@ module Context = struct
     try let r = saturate_model ctx in
       let _ = let (_, _, ubs) = IMap.find 0 ctx.levels in assert (List.for_all (fun u -> not (IMap.mem 0 u) || not (IMap.cardinal u = 1) || 0 <= IMap.find 0 u) ubs) in
       r
-    with Loop _ -> raise (UnivError (ctx, UnivInconsistency (u1, u2)))
+    with Loop _ ->
+      let () = print_endline ("inconsistent level constraint " ^ Level.print u1 ^ " <= " ^ Level.print u2 ^ " in\n" ^ print ctx) in
+      raise (UnivError (ctx, UnivInconsistency (u1, u2)))
 
   let add_constraint u1 u2 =
     let (s1, u1) = u1 in
@@ -313,7 +317,7 @@ module Context = struct
     let ns = Option.map_or 0 (fun (ns, _) -> ns + 1) (IMap.max_binding_opt ctx.sorts) in
     let nu = fst (IMap.max_binding ctx.levels) in
     let newsorts = List.init (IMap.cardinal ctx'.sorts) (fun i -> Sort.Var (ns + i)) in
-    let newunivs = List.init (fst (IMap.max_binding ctx'.levels)) (fun i -> Level.of_var (nu + i)) in
+    let newunivs = List.init (fst (IMap.max_binding ctx'.levels)) (fun i -> Level.of_var (nu + i + 1)) in
     let ss = IMap.mapi (fun n _ -> n + ns) ctx'.sorts in
     let sorts = IMap.fold (fun n (name, l, u, lbs, ubs) ->
       IMap.add (n + ns) (name, l, u, ISet.map (fun n -> n + ns) lbs, ISet.map (fun n -> n + ns) ubs)) ctx'.sorts ctx.sorts in

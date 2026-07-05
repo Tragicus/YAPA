@@ -35,6 +35,10 @@ module ISet = Set.Make(Int)
 module List = struct
   include List
 
+  let uncons = function
+    | [] -> failwith "uncons"
+    | x :: q -> (x, q)
+
   (* `split_last_at acc i [x_0; ...; x_n]` = `([x_0; ...; x_(i-1)] @ List.rev acc, [x_i; ...; x_n]` *)
   let rec split_at ?(acc=[]) i l =
     if i = 0 then List.rev acc, l else
