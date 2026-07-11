@@ -1,0 +1,208 @@
+Definition id {T} (x : T) := x.
+
+Definition eq {A : Type} (a : A) : A -> Type :=
+  ind eq : A -> Type | eq a end.
+
+Definition eq_refl {A} {a : A} := (eq a).mk(0).
+
+Hint "refine eq_refl" for @eq _ _ _.
+
+Definition eq_sym {A} {a b : A} : eq a b -> eq b a := fun (ab : eq a b) => match ab return fun c ac => eq c a with | eq_refl => eq_refl end.
+
+Definition eq_trans {A} {b a c : A} : eq a b -> eq b c -> eq a c := fun (ab : eq a b) =>
+  match ab return fun d ad => eq d c -> eq a c with | eq_refl => id end.
+
+Definition prod T U := ind prod : Type | T -> U -> prod end.
+Definition pair {T U} : T -> U -> prod T U := (prod T U).mk(0).
+Definition fst {T U} (x : prod T U) : T := match x return fun x => T with | pair t u => t end.
+Definition snd {T U} (x : prod T U) : U := match x return fun x => U with | pair t u => u end.
+Definition and := prod.
+
+Definition prodC {T U} (x : prod T U) : prod U T := match x return fun x => prod U T with | (prod T U).mk(0) t u => pair u t end.
+Definition prodA {T U V} (x : prod T (prod U V)) : prod (prod T U) V :=
+  match x with | pair t uv =>
+  match uv with | pair u v =>
+  pair (pair t u) v end end.
+
+Definition sum T U := ind sum : Type | T -> sum | U -> sum end.
+Definition inl {T U} : T -> sum T U := (sum T U).mk(0).
+Definition inr {T U} : U -> sum T U := (sum T U).mk(1).
+Definition or := sum.
+
+Definition sumC {T U} (x : sum T U) : sum U T :=
+  match x with
+  | inl t => inr t
+  | inr u => inl u
+  end.
+
+Definition sumA {T U V} (x : sum T (sum U V)) : sum (sum T U) V :=
+  match x with
+  | inl t => inl (inl t)
+  | inr uv =>
+    match uv with
+    | inl u => inl (inr u)
+    | inr v => inr v
+    end
+  end.
+
+Definition empty := ind empty : Type end.
+
+Definition False := empty.
+
+Definition not T := T -> False.
+
+Definition unit := ind unit : Type | unit end.
+Definition tt := (unit).mk(0).
+Hint "exact tt" for unit.
+
+Definition True := unit.
+Hint "exact tt" for True.
+
+Definition andTp {P} : P -> and True P := pair tt.
+Definition andpT {P} : P -> and P True := fun p => pair p tt.
+Hint "refine (andTp _)" for and True _.
+Hint "refine (andpT _)" for and _ True.
+
+Definition impl T U := T -> U.
+
+Definition Reflexive {T} (R : T -> T -> Type) := forall x, R x x.
+
+Definition Reflexive_impl : Reflexive impl.
+Proof. exact @id. Qed.
+
+Hint "exact Reflexive_impl" for Reflexive impl.
+
+Definition swap_rel {T U} (R : T -> U -> Type) x y := R y x.
+
+Definition Reflexive_swap_rel {T} (R : T -> T -> Type) : Reflexive R -> Reflexive (swap_rel R).
+Proof. intros RR x. apply RR. Qed.
+
+Hint "refine (Reflexive_swap_rel _ _)" for @Reflexive _ (@swap_rel _ _ _).
+
+Definition Symmetric {T} (R : T -> T -> Type) := forall {x y}, R x y -> swap_rel R x y.
+
+Definition Symmetric_eq {T} : Symmetric (@eq T).
+Proof. apply @eq_sym. Qed.
+
+Hint "exact Symmetric_eq" for @Symmetric _ (@eq _).
+
+Definition RwRel {I T} {RI : I -> I -> Type} {RT : T -> T -> Type} (f : I -> T) (x y : I) := RI x y -> RT (f x) (f y).
+
+Definition RwRel_forget {I T} {RI : I -> I -> Type} {RT : T -> T -> Type} (t : T) (x y : I) {RT_refl : Reflexive RT} : @RwRel I T RI RT (fun x => t) x y.
+Proof. intros z. apply RT_refl. Qed.
+
+Hint "refine (RwRel_forget _ _ _)" for @RwRel _ _ _ _ (fun x => _) _ _.
+
+Definition RwRel_id {T} {RT : T -> T -> Type} (x y : T) : @RwRel T T RT RT (fun x => x) x y.
+Proof. apply id. Qed.
+
+Hint "refine (RwRel_id _ _)" for @RwRel _ _ _ _ (fun x => x) _ _.
+
+Definition RwRel_sym {I T} {RI : I -> I -> Type} {RT : T -> T -> Type} (f : I -> T) (x y : I) : @RwRel I T (swap_rel RI) RT f y x -> @RwRel I T RI (swap_rel RT) f x y.
+Proof. apply id. Qed.
+
+Hint "refine (RwRel_sym _ _ _ _)" for @RwRel _ _ _ (@swap_rel _ _ _) _ _ _.
+
+Definition RwRel_Symmetric_sym {I T} {RI : I -> I -> Type} {RT : T -> T -> Type} (f : I -> T) (x y : I) {RI_sym : Symmetric RI} : @RwRel I T RI RT f y x -> @RwRel I T (swap_rel RI) RT f y x.
+Proof. intros fP xy. exact (fP (RI_sym xy)). Qed.
+
+Hint "refine (RwRel_Symmetric_sym _ _ _ _)" for @RwRel _ _ (@swap_rel _ _ _) _ _ _ _.
+
+Definition RwRel_swapKl {I T} {RI : I -> I -> Type} {RT : T -> T -> Type} (f : I -> T) (x y : I) : @RwRel I T RI RT f y x -> @RwRel I T (swap_rel (swap_rel RI)) RT f y x.
+Proof. exact id. Qed.
+
+Hint "refine (RwRel_swapKl _ _ _ _)" for @RwRel _ _ (@swap_rel _ _ (@swap_rel _ _ _)) _ _ _ _.
+
+Definition eq_RwRel {I T} (RT : T -> T -> Type) (f : I -> T) (x y : I) {RT_refl : Reflexive RT} : @RwRel I T (@eq I) RT f x y :=
+  fun (xy : eq x y) =>
+  match xy return fun z xz => RT (f x) (f z) with
+  | eq_refl => RT_refl (f x)
+  end.
+
+Hint "refine (eq_RwRel _ _ _ _)" for @RwRel _ _ (@eq _) _ _ _ _.
+
+Definition eqfun {I T} (f : I -> T) (x y : I) : eq x y -> eq (f x) (f y).
+Proof.
+intro xy.
+rw xy.
+apply eq_refl.
+Qed.
+
+Definition RwRel_impl_impl {I} (RI : I -> I -> Type) (f g : I -> Type) (x y : I) : @RwRel I Type RI (swap_rel impl) f x y -> @RwRel I Type RI impl g x y -> @RwRel I Type RI impl (fun x => (f x) -> (g x)) x y.
+Proof.
+intros fP gP xy fgx fy.
+exact (gP xy (fgx (fP xy fy))).
+Qed.
+
+Hint "refine (RwRel_impl_impl _ _ _ _ _ _ _)" for @RwRel _ _ _ impl (fun x => impl _ _) _ _.
+Hint "refine (RwRel_impl_impl _ _ _ _ _ _ _)" for @RwRel _ _ _ impl (fun x => _ -> _) _ _.
+
+Definition RwRel_impl_prod {I} (RI : I -> I -> Type) (f g : I -> Type) (x y : I) : @RwRel I Type RI impl f x y -> @RwRel I Type RI impl g x y -> @RwRel I Type RI impl (fun x => prod (f x) (g x)) x y.
+Proof.
+intros fP gP xy fg.
+exact (pair (fP xy (fst fg)) (gP xy (snd fg))).
+Qed.
+
+Hint "refine (RwRel_impl_prod _ _ _ _ _ _ _)" for @RwRel _ _ _ impl (fun x => prod _ _) _ _.
+
+Definition RwRel_impl_or {I} (RI : I -> I -> Type) (f g : I -> Type) (x y : I) : @RwRel I Type RI impl f x y -> @RwRel I Type RI impl g x y -> @RwRel I Type RI impl (fun x => sum (f x) (g x)) x y.
+Proof.
+intros fP gP xy fg.
+exact (match fg with
+  | inl fy => inl (fP xy fy)
+  | inr gy => inr (gP xy gy)
+  end).
+Qed.
+
+Hint "refine (RwRel_impl_prod _ _ _ _ _ _ _)" for @RwRel _ _ _ impl (fun x => sum _ _) _ _.
+
+Definition iff T U := prod (T -> U) (U -> T).
+
+Definition Reflexive_iff : Reflexive iff.
+Proof. intros T. exact (pair id id). Qed.
+
+Hint "exact @Reflexive_iff" for Reflexive iff.
+
+Definition Symmetric_iff : Symmetric iff.
+Proof. intros T U. apply prodC. Qed.
+
+Hint "exact @Symmetric_iff" for Symmetric iff.
+
+Definition RwRel_iff_sub_impl (T U : Type) : @RwRel Type Type iff impl (fun x => x) T U.
+Proof. apply fst. Qed.
+
+Hint "refine (@RwRel_iff_sub_impl _ _)" for @RwRel _ _ iff impl (fun x => x) _ _.
+
+Definition RwRel_impl_iff {I} (RI : I -> I -> Type) (f g : I -> Type) (x y : I) : @RwRel I Type RI iff f x y -> @RwRel I Type RI iff g x y -> @RwRel I Type RI impl (fun x => iff (f x) (g x)) x y.
+Proof.
+intros fP gP xy fgx.
+apply pair.
+  intros fy.
+  apply (fst (gP xy)).
+  apply (fst fgx).
+  apply (snd (fP xy)).
+  exact fy.
+intros gy.
+apply (fst (fP xy)).
+apply (snd fgx).
+apply (snd (gP xy)).
+exact gy.
+Qed.
+
+Hint "refine (@RwRel_impl_iff _ _ _ _ _ _ _ _)" for @RwRel _ _ _ impl (fun x => iff _ _) _ _.
+
+Definition RwRel_iff_impl {I} (RI : I -> I -> Type) (f : I -> Type) (x y : I) : @RwRel I Type RI impl f x y -> @RwRel I Type RI (swap_rel impl) f x y -> @RwRel I Type RI iff f x y.
+Proof.
+intros fxy fyx xy. apply pair.
+  exact (fxy xy).
+exact (fyx xy).
+Qed.
+
+Hint "refine (@RwRel_iff_sub_impl _ _ _ _ _ _ _)" for @RwRel _ _ _ iff _ _ _.
+
+Definition iff_trans {T U V} : iff U T -> iff T V -> iff U V.
+Proof.
+intros UT.
+rw UT.
+apply id.
+Qed.
