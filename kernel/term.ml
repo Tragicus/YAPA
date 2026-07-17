@@ -16,6 +16,57 @@ type 'a head =
 type term = { hd: term head; args: term list }
 type t = term
 
+let binder_to_json value_to_json (v, ty, t, impl) = `List [ String.to_json v; value_to_json ty; Option.to_json value_to_json t; Int.to_json (if impl then 1 else 0) ]
+
+let head_to_json value_to_json = function
+  | Var i -> `Assoc [ ("var", (Int.to_json i : Yojson.Basic.t)) ]
+  | Const (s, u, v) -> `Assoc [ ("const", `List [String.to_json s; List.to_json Univ.Sort.to_json u; List.to_json Univ.Level.to_json v]) ]
+  | Fun (f, tele, body) -> `Assoc [ ((if f then "forall" else "fun"), `List [ List.to_json (binder_to_json value_to_json) tele; value_to_json body ]) ]
+  | Type (s, u) -> `Assoc [ ("type", `List [ Univ.Sort.to_json s; Univ.Level.to_json u ]) ]
+  | Ind (v, a, c) -> `Assoc [ ("ind", `List [ String.to_json v; value_to_json a; List.to_json value_to_json c ]) ]
+  | Construct (ind, i) -> `Assoc [ ("mk", `List [ value_to_json ind; Int.to_json i ]) ]
+  | Case (ind, r) -> `Assoc [ ("match", `List [ value_to_json ind; Int.to_json (if r then 1 else 0) ]) ]
+
+let binder_of_json value_of_json j = 
+  match List.of_json (fun x -> x) j with
+  | v :: ty :: t :: impl :: [] -> (String.of_json v, value_of_json ty, Option.of_json value_of_json t, Int.of_json impl = 1)
+  | _ -> raise (Invalid_argument "head_of_json.tele")
+
+let head_of_json value_of_json j =
+  match List.hd (Yojson.Basic.Util.keys j) with
+  | "var" -> Var (Int.of_json (Yojson.Basic.Util.member "var" j))
+  | "const" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "const" j) with
+    | s :: u :: v :: [] -> Const (String.of_json s, List.of_json Univ.Sort.of_json u, List.of_json Univ.Level.of_json v)
+    | _ -> raise (Invalid_argument "head_of_json.const"))
+  | ("forall" | "fun" ) as k ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member k j) with
+    | tele :: body :: [] -> Fun (k = "forall", List.of_json (binder_of_json value_of_json) tele, value_of_json body)
+    | _ -> raise (Invalid_argument ("head_of_json." ^ k)))
+  | "type" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "type" j) with
+    | s :: u :: [] -> Type (Univ.Sort.of_json s, Univ.Level.of_json u)
+    | _ -> raise (Invalid_argument "head_of_json.type"))
+  | "ind" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "ind" j) with
+    | v :: a :: c :: [] -> Ind (String.of_json v, value_of_json a, List.of_json value_of_json c)
+    | _ -> raise (Invalid_argument "head_of_json.ind"))
+  | "mk" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "mk" j) with
+    | ind :: i :: [] -> Construct (value_of_json ind, Int.of_json i)
+    | _ -> raise (Invalid_argument "head_of_json.mk"))
+  | "match" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "match" j) with
+    | ind :: r :: [] -> Case (value_of_json ind, Int.of_json r = 1)
+    | _ -> raise (Invalid_argument "head_of_json.match"))
+  | _ -> raise (Invalid_argument "head_of_json")
+
+let rec to_json t =
+  `Assoc [ ("hd", head_to_json to_json t.hd); ("args", List.to_json to_json t.args) ]
+
+let rec of_json j =
+  { hd = head_of_json of_json (Yojson.Basic.Util.member "hd" j); args = List.of_json of_json (Yojson.Basic.Util.member "args" j) }
+
 type context = {
   univ : Univ.Context.t;
   var : t binder IMap.t;
@@ -838,5 +889,11 @@ module Context = struct
       "\t Global variables:"] @
 
       List.map (fun (v, (_, ty, t)) -> "\t\t" + v + " : " + print ty ctx + (match t with | None -> "" | Some t -> " := " + print t ctx)) (SMap.to_list ctx.const))
+
+  let to_json ctx =
+    SMap.to_json String.to_json (fun (u, ty, t) -> `Assoc [ ("univ", Univ.Context.to_json u); ("ty", to_json ty); ("body", Option.to_json to_json t) ]) ctx.const
+
+  let of_json j =
+    { empty with const = SMap.of_json Yojson.Basic.Util.to_string (fun j -> (Univ.Context.of_json (Yojson.Basic.Util.member "univ" j), of_json (Yojson.Basic.Util.member "ty" j), Option.of_json of_json (Yojson.Basic.Util.member "body" j))) j }
 end
 

@@ -16,6 +16,19 @@ module Sort = struct
   let subst ss s = match s with | Var s -> IMap.find s ss | _ -> s
 
   let free_vars s = match s with | Var s -> ISet.singleton s | _ -> ISet.empty
+
+  let to_json = function
+    | SProp -> `Int 0
+    | Prop -> `Int 1
+    | Type -> `Int 2
+    | Var s -> `Assoc [ ("var", `Int s) ]
+
+  let of_json j =
+    match j with
+    | `Int 0 -> SProp
+    | `Int 1 -> Prop
+    | `Int 2 -> Type
+    | _ -> Var (Int.of_json (Yojson.Basic.Util.member "var" j))
 end
 
 module Level = struct
@@ -63,6 +76,9 @@ module Level = struct
     IMap.fold (fun u n v -> max v (add n (IMap.find u su))) u IMap.empty
 
   let free_vars u = IMap.fold (fun u _ -> ISet.add u) u ISet.empty
+
+  let to_json = IMap.to_json (fun i -> `Int i) (fun i -> `Int i)
+  let of_json = IMap.of_json (function | `Int i -> i | _ -> raise (Invalid_argument "Univ.of_json.key_of_json")) (function | `Int i -> i | _ -> raise (Invalid_argument "Univ.of_json.value_of_json"))
 end
 
 type t = Sort.t * Level.t
@@ -445,5 +461,23 @@ module Context = struct
     let rename u = fst (IMap.min_binding (IMap.find u su)) in
     let levels = IMap.of_list (List.map (fun (u, (n, m, ubs)) -> (rename u, (n, m, List.map (fun u -> IMap.of_list (List.map (fun (u, n) -> (rename u, n)) (IMap.to_list u))) ubs))) (List.filter (fun (u, _) -> ISet.mem u fu) (IMap.to_list ctx.levels))) in
     { sorts; levels }, (ss, su)
+
+  let to_json ctx =
+    `Assoc [ ("sorts", IMap.to_json Int.to_json (fun (v, l, u, lbs, ubs) -> `List [ Option.to_json String.to_json v; Sort.to_json l; Sort.to_json u; ISet.to_json Int.to_json lbs; ISet.to_json Int.to_json ubs ]) ctx.sorts);
+    ("levels", IMap.to_json Int.to_json (fun (v, m, ubs) ->
+      `List [ Option.to_json String.to_json v;
+        `Int m;
+        List.to_json Level.to_json ubs
+    ]) ctx.levels) ]
+
+  let of_json j =
+    { sorts = IMap.of_json Int.of_json (fun j ->
+        match List.of_json (fun j -> j) j with
+        | v :: l :: u :: lbs :: ubs :: [] -> (Option.of_json String.of_json v, Sort.of_json l, Sort.of_json u, ISet.of_json Int.of_json lbs, ISet.of_json Int.of_json ubs)
+        | _ -> raise (Invalid_argument "Kernel.Univ.Context.of_json.sorts")) (Yojson.Basic.Util.member "sorts" j);
+      levels = IMap.of_json Int.of_json (fun j ->
+        match List.of_json (fun j -> j) j with
+        | v :: m :: ubs :: [] -> (Option.of_json String.of_json v, Int.of_json m, List.of_json Level.of_json ubs)
+        | _ -> raise (Invalid_argument "Kernel.Univ.Context.of_json.levels")) (Yojson.Basic.Util.member "levels" j) }
 
 end

@@ -1,4 +1,4 @@
-(* open Utils *)
+open Utils
 
 type 'a binder = 'a * 'a option
 type 'a telescope = 'a binder list
@@ -32,6 +32,53 @@ type pattern = { hd: pattern head; args: pattern list }
 type t = pattern
 
 let of_hd hd = { hd; args = [] }
+
+let binder_to_json value_to_json (ty, t) = `List [ value_to_json ty; Option.to_json value_to_json t ]
+
+let head_to_json value_to_json = function
+  | Var i -> `Assoc [ ("var", (Int.to_json i : Yojson.Basic.t)) ]
+  | Const s -> `Assoc [ ("const", String.to_json s) ]
+  | Fun (f, tele, body) -> `Assoc [ ((if f then "forall" else "fun"), `List [ List.to_json (binder_to_json value_to_json) tele; value_to_json body ]) ]
+  | Type -> `Assoc [ ("type", Int.to_json 0) ]
+  | Ind (a, c) -> `Assoc [ ("ind", `List [ value_to_json a; List.to_json value_to_json c ]) ]
+  | Construct (ind, i) -> `Assoc [ ("mk", `List [ value_to_json ind; Int.to_json i ]) ]
+  | Case (ind, r) -> `Assoc [ ("match", `List [ value_to_json ind; Int.to_json (if r then 1 else 0) ]) ]
+  | Any -> `Assoc [ ("any", Int.to_json 0) ]
+
+let binder_of_json value_of_json j = 
+  match List.of_json (fun x -> x) j with
+  | ty :: t :: [] -> (value_of_json ty, Option.of_json value_of_json t)
+  | _ -> raise (Invalid_argument "head_of_json.tele")
+
+let head_of_json value_of_json j =
+  match List.hd (Yojson.Basic.Util.keys j) with
+  | "var" -> Var (Int.of_json (Yojson.Basic.Util.member "var" j))
+  | "const" -> Const (String.of_json (Yojson.Basic.Util.member "const" j))
+  | ("forall" | "fun" ) as k ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member k j) with
+    | tele :: body :: [] -> Fun (k = "forall", List.of_json (binder_of_json value_of_json) tele, value_of_json body)
+    | _ -> raise (Invalid_argument ("head_of_json." ^ k)))
+  | "type" -> Type
+  | "ind" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "ind" j) with
+    | a :: c :: [] -> Ind (value_of_json a, List.of_json value_of_json c)
+    | _ -> raise (Invalid_argument "head_of_json.ind"))
+  | "mk" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "mk" j) with
+    | ind :: i :: [] -> Construct (value_of_json ind, Int.of_json i)
+    | _ -> raise (Invalid_argument "head_of_json.mk"))
+  | "match" ->
+    (match List.of_json (fun x -> x) (Yojson.Basic.Util.member "match" j) with
+    | ind :: r :: [] -> Case (value_of_json ind, Int.of_json r = 1)
+    | _ -> raise (Invalid_argument "head_of_json.match"))
+  | "any" -> Any
+  | _ -> raise (Invalid_argument "head_of_json")
+
+let rec to_json t =
+  `Assoc [ ("hd", head_to_json to_json t.hd); ("args", List.to_json to_json t.args) ]
+
+let rec of_json j =
+  { hd = head_of_json of_json (Yojson.Basic.Util.member "hd" j); args = List.of_json of_json (Yojson.Basic.Util.member "args" j) }
 
 let rec fold fold_hd fold_app t =
   let fold = fold fold_hd fold_app in
@@ -98,4 +145,7 @@ module Map = struct
 
   let find_all t pat =
     List.filter_map (fun (pat', x) -> if eq pat pat' then Some x else None) t
+
+  let to_json value_to_json = List.to_json (fun (pat, x) -> `Assoc [ ("pattern", to_json pat); ("value", value_to_json x) ])
+  let of_json value_of_json = List.of_json (fun j -> (of_json (Yojson.Basic.Util.member "pattern" j), value_of_json (Yojson.Basic.Util.member "value" j)))
 end

@@ -1476,4 +1476,12 @@ module Context = struct
         String.concat "" (List.map (fun (var, l, r) -> let ctx = { ectx with var } in "\n\t\t\t" + print ~debug l ctx + " =~= " + print ~debug r ctx) cstrs)
       ) (IMap.to_list ctx.evar))
 
+  let to_json ctx =
+    `Assoc [ ("const", SMap.to_json String.to_json (fun (u, ty, t) -> `Assoc [ ("univ", Kernel.Univ.Context.to_json u); ("ty", Kernel.Term.to_json ty); ("body", Option.to_json Kernel.Term.to_json t) ]) ctx.const);
+      ("hints", Pattern.Map.to_json String.to_json ctx.hints) ]
+
+  let of_json j =
+    { empty with
+      const = SMap.of_json Yojson.Basic.Util.to_string (fun j -> (Kernel.Univ.Context.of_json (Yojson.Basic.Util.member "univ" j), Kernel.Term.of_json (Yojson.Basic.Util.member "ty" j), Option.of_json Kernel.Term.of_json (Yojson.Basic.Util.member "body" j))) (Yojson.Basic.Util.member "const" j);
+      hints = Pattern.Map.of_json String.of_json (Yojson.Basic.Util.member "hints" j) }
 end

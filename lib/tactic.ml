@@ -73,7 +73,7 @@ let rec synthesize_goal goal =
     let ctx, subgoals = exec tac goal ctx in
     let ctx, _ = EC.Monad.List.map synthesize_goal subgoals ctx in
     ctx, ()
-    with | E.TypeError _ -> try_hints hints ctx in
+    with | E.TypeError _ | Error _ -> try_hints hints ctx in
   let* hints = Goal.enter goal (fun concl ->
     let* ty = E.typecheck concl in
     EC.Monad.to_mut (EC.get_hints ty)) in

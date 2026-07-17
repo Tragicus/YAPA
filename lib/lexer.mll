@@ -45,6 +45,7 @@ rule token = parse
   | "Proof" { PROOF }
   | "Whd" { WHD }
   | "Eval" { EVAL }
+  | "Import" { IMPORT }
   | "Set" { SET }
   | "Unset" { UNSET }
   | "Stop" { STOP }

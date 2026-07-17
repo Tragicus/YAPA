@@ -23,7 +23,7 @@
  (name yapa)
  (synopsis "A short synopsis")
  (description "A longer description")
- (depends ocaml)
+ (depends (ocaml (= 5.3.0)) yojson)
  (tags
   ("add topics" "to describe" your project)))
 

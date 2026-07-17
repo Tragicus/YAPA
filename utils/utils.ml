@@ -1,37 +1,3 @@
-module Map = struct
-  module Make(T: sig include Map.OrderedType val print : t -> string end) = struct
-    include Stdlib.Map.Make(T)
-
-    let print pp_elt m =
-      let (+) = String.cat in
-      "{ " + String.concat ", " (List.map (fun (i, v) -> T.print i + " -> " + pp_elt v) (to_list m)) + " }"
-  end
-end
-
-module Set = struct
-  module Make(T: sig include Set.OrderedType val print : t -> string end) = struct
-    include Stdlib.Set.Make(T)
-
-    let print m =
-      let (+) = String.cat in
-      "{ " + String.concat ", " (List.map T.print (to_list m)) + " }"
-  end
-end
-module String = struct
-  include String
-  let print s = s
-end
-module Int = struct
-  include Int
-  let (+) = (+)
-  let print = string_of_int
-end
-module SMap = Map.Make(String)
-module SSet = Set.Make(String)
-module IMap = Map.Make(Int)
-module ISet = Set.Make(Int)
-
-
 module List = struct
   include List
 
@@ -45,7 +11,54 @@ module List = struct
     match l with
     | [] -> raise Not_found
     | x :: l -> split_at ~acc:(x :: acc) (i-1) l
+
+  let to_json value_to_json l = `List (List.map value_to_json l)
+  let of_json value_of_json j = List.map value_of_json (Yojson.Basic.Util.to_list j)
 end
+
+module Map = struct
+  module Make(T: sig include Map.OrderedType val print : t -> string end) = struct
+    include Stdlib.Map.Make(T)
+
+    let print pp_elt m =
+      let (+) = String.cat in
+      "{ " + String.concat ", " (List.map (fun (i, v) -> T.print i + " -> " + pp_elt v) (to_list m)) + " }"
+
+    let to_json key_to_json value_to_json m = List.to_json (fun (k, v) -> `Assoc [ ("key", key_to_json k); ("value", value_to_json v) ]) (to_list m)
+    let of_json key_of_json value_of_json j = of_list (List.of_json (fun j ->
+      (key_of_json (Yojson.Basic.Util.member "key" j), value_of_json (Yojson.Basic.Util.member "value" j))) j)
+  end
+end
+
+module Set = struct
+  module Make(T: sig include Set.OrderedType val print : t -> string end) = struct
+    include Stdlib.Set.Make(T)
+
+    let print m =
+      let (+) = String.cat in
+      "{ " + String.concat ", " (List.map T.print (to_list m)) + " }"
+
+    let to_json value_to_json m = List.to_json value_to_json (to_list m)
+    let of_json value_of_json j = of_list (List.of_json value_of_json j)
+  end
+end
+module String = struct
+  include String
+  let print s = s
+  let to_json s = `String s
+  let of_json = Yojson.Basic.Util.to_string
+end
+module Int = struct
+  include Int
+  let (+) = (+)
+  let print = string_of_int
+  let to_json i = `Int i
+  let of_json = Yojson.Basic.Util.to_int
+end
+module SMap = Map.Make(String)
+module SSet = Set.Make(String)
+module IMap = Map.Make(Int)
+module ISet = Set.Make(Int)
 
 module Option = struct
   include Option
@@ -58,10 +71,15 @@ module Option = struct
   let map_or x f = function
     | None -> x
     | Some x -> f x
+
+  let to_json value_to_json x = List.to_json value_to_json (Option.to_list x)
+  let of_json value_of_json j = List.nth_opt (List.of_json value_of_json j) 0
 end
 
 module Random = struct
-  let int () = Random.int 999999999
+  include Random
+
+  let int () = 100000000 + Random.int 899999999
 end
 
 let timestamp x =

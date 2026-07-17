@@ -6,7 +6,7 @@
 %token LET IN FORALL TARROW COMMA DOT COLON SCOLON COLONEQ AT ATLCBRACE HOLE
 %token TYPE PROP SPROP
 %token IND PIPE MATCH REC WITH RETURN END MK
-%token PRINT CHECK DEF PROOF WHD EVAL SET UNSET STOP
+%token PRINT CHECK DEF PROOF WHD EVAL IMPORT SET UNSET STOP
 %token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION AUTO PATTERN RW
 %token QED DEFINED
 %token HINT FOR
@@ -53,6 +53,7 @@ toplevel:
   | QED; DOT { Commands.Qed false }
   | DEFINED; DOT { Commands.Qed true }
   | HINT; STRING; FOR; term; DOT { Commands.Hint ($4, $2) }
+  | IMPORT; STRING; DOT { Commands.Import $2 }
   | SET; STRING; COLONEQ; STRING; DOT { Commands.Set ($2, $4) }
   | UNSET; STRING; DOT { Commands.Unset $2 }
   | STOP; DOT { Commands.Stop }
