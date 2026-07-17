@@ -17,6 +17,7 @@ rule token = parse
   | [' ' '\t']+ { token lexbuf }
   | '\n' { Lexing.new_line lexbuf; token lexbuf }
   | ['0'-'9']+ as s { INT (int_of_string s) }
+  | "(*" { comment 0 lexbuf; token lexbuf }
   | '"' { string [] lexbuf }
   | '(' { LPAR }
   | ')' { RPAR }
@@ -79,3 +80,8 @@ and string acc = parse
   | '"' { STRING (String.of_seq (List.to_seq (List.rev acc))) }
   | '\\' (backslash_escapes as c) { string ((char_for_backslash c) :: acc) lexbuf }
   | _ as c { string (c :: acc) lexbuf }
+
+and comment level = parse
+  | "*)" { if level = 0 then () else comment (level - 1) lexbuf }
+  | "(*" { comment (level + 1) lexbuf }
+  | _ { comment level lexbuf }
