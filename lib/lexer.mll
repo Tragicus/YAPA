@@ -55,12 +55,15 @@ rule token = parse
   | "apply" { APPLY }
   | "intros" { INTRO }
   | "intro" { INTRO }
+  | "revert" { REVERT }
   | "clear" { CLEAR }
   | "assumption" { ASSUMPTION }
   | "auto" { AUTO }
   | "pattern" { PATTERN }
   | "rw" { RW }
   | "rewrite" { RW }
+  | "case" { CASE }
+  | "elim" { ELIM }
   | "Qed" { QED }
   | "Defined" { DEFINED }
   | "Hint" { HINT }

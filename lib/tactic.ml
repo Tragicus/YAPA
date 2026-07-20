@@ -10,10 +10,12 @@ type t =
   | Refine of P.t
   | Apply of P.t list
   | Intro of string list
+  | Revert of string (* TODO: Do an optimized version for several reverts. *)
   | Clear of string list
   | Assumption
   | Pattern of P.t list
   | Rw of P.t
+  | Case of bool
   | Auto
   | Seq of t list
 
@@ -30,10 +32,12 @@ let rec print = function
   | Refine t -> "refine " ^ (P.print t) ^ "."
   | Apply l -> "apply " ^ String.concat ", " (List.map P.print l) ^ "."
   | Intro l -> "intros " ^ String.concat " " l ^ "."
+  | Revert name -> "revert " ^ name ^ "."
   | Clear l -> "clear " ^ String.concat " " l ^ "."
   | Assumption -> "assumption."
   | Pattern l -> "pattern " ^ String.concat ", " (List.map P.print l) ^ "."
   | Rw t -> "rewrite " ^ P.print t ^ "."
+  | Case r -> if r then "elim." else "case."
   | Auto -> "auto."
   | Seq [] -> "idtac."
   | Seq tacs -> String.concat "; " (List.map print tacs)
@@ -127,6 +131,29 @@ and exec tac goal =
     let* tele, _ = E.destArity ~whd_rty:false ~keep_let:true ~until:(Exact (List.length names)) ty in
     let tele = List.map (fun (v, (_, ty, t, impl)) -> (v, ty, t, impl)) (List.combine names tele) in
     ret [{ goal with ctx = goal.ctx @ tele }])
+  | Revert name -> 
+    Goal.enter goal (fun concl ->
+    let** d = EC.depth in
+    let* hyp = let* t = PC.Monad.to_engine (P.elaborate (P.mkConst name None)) in fun ctx -> try ctx, E.destVar t with _ -> failwith (name ^ " is not a local variable") in
+    let etele, tele = List.split_at (d - 1 - hyp) goal.ctx in
+    if hyp = 0 then EC.Monad.ret [{ goal with ctx = etele }] else
+    let tele = List.mapi (fun i x -> (i, x)) (List.rev tele) in
+    let* tele = EC.Monad.List.map (fun (i, (v, ty, t, impl)) ->
+      let* ty = E.rm_problematic_term (fun t -> let+* d' = EC.depth in match t.hd with | Var j when List.is_empty t.args -> j = hyp - i + d' - d | _ -> false) ty in
+      let** ty = match ty with | Some ty -> EC.Monad.iret ty | None -> fun ctx -> raise (E.TypeError (ctx, UnboundVar (hyp - i))) in
+      let+ t = EC.Monad.Option.map (fun t ->
+        let* t = E.rm_problematic_term (fun t -> let+* d' = EC.depth in match t.hd with | Var j when List.is_empty t.args -> j = hyp - i + d' - d | _ -> false) t in
+        let** t = match t with | Some t -> EC.Monad.iret t | None -> fun ctx -> raise (E.TypeError (ctx, UnboundVar (hyp - i))) in
+        EC.Monad.ret t
+        ) t in
+      (v, ty, t, impl)
+    ) tele in
+    let tele = etele @ (List.rev tele) in
+    let* ty = E.typecheck concl in
+    let ty = Some (E.mkForall tele (E.subst (fun i -> E.mkVar (if i = hyp then 0 else if i < hyp then i + 1 else i)) ty)) in
+    let* ev = EC.new_evar ~ty ~with_ctx:false in
+    let+ () = E.instantiate_evar concl (E.mkApp ((List.init (d - 1 - hyp) (fun i -> E.mkVar (d - 1 - i))) @ (List.init hyp (fun i -> E.mkVar (hyp - 1 - i))) @ [E.mkVar hyp]) ev) in
+    [Goal.{ ctx = tele; goal = E.destEvar ev }])
   | Clear [] -> ret [goal]
   | Clear hyps ->
     Goal.enter goal (fun concl ->
@@ -151,35 +178,63 @@ and exec tac goal =
     let* ty = E.typecheck g in
     let* ty = E.pattern pats ty in
     let** (_, t, cstrs) = EC.find_evar goal.goal in
-    fun ctx -> { ctx with evar = IMap.add goal.goal (E.mkForall goal.ctx ty, t, cstrs) ctx.evar }, [goal])
-  | Rw rw ->
-    Goal.enter goal (fun concl ->
-      let* rw = PC.Monad.to_engine (P.elaborate rw) in
-      let* rwty = E.typecheck rw in
-      if List.length rwty.E.args < 2 then fun ctx -> raise (Error (ctx, NoRw rwty)) else
-      let args, xy = List.split_at (List.length rwty.E.args - 2) rwty.E.args in
-      let rwty = E.{ hd = rwty.hd; args } in
-      let x, y = match xy with | [x; y] -> x, y | _ -> failwith "unreachable" in
-      let* tyx = E.typecheck x in
-      (* We extract `x` from the conclusion. *)
-      let* tyg = E.typecheck concl in
-      let* f = E.pattern [x] tyg in
-      let f = E.of_hd (f.hd) in
-      (* We find the proof. *)
-      let* hd = E.fresh_const "RwRel" in
-      let* swap_rel = E.fresh_const "swap_rel" in
-      let* impl = E.fresh_const "impl" in
-      let* u1 = EC.new_univ in
-      let* u2 = EC.new_univ in
-      let* u3 = EC.new_univ in
-      let* rwrel_evar = EC.new_evar ~ty:(Some { hd = hd.hd; args = [tyx; E.mkType u1; rwty; E.mkApp [E.mkType u2; E.mkType u3; impl] swap_rel; f; x; y] }) ~with_ctx:true in
-      let* () = fun ctx -> try synthesize_goal Goal.{ ctx = (List.map snd (IMap.to_list ctx.E.var)); goal = E.destEvar (E.of_hd rwrel_evar.hd) } ctx with E.TypeError _ -> raise (Error (ctx, NoRw rwty)) in
-      let fy = E.{ hd = f.hd; args = [y] } in
-      let** fy = E.whd ~flags:{ E.whd_flags_none with beta = true; steps = Some 1 } fy in
-      let* ry = EC.new_evar ~ty:(Some fy) ~with_ctx:true in
-      let* () = E.instantiate_evar concl (E.mkApp [rw; ry] rwrel_evar) in
-      let** subgoals = Goal.collect_goals ry in
-      EC.Monad.ret subgoals)
+    fun ctx -> { ctx with evar = IMap.add goal.goal (E.mkForall goal.ctx { ty with args = ty.args @ pats }, t, cstrs) ctx.evar }, [goal])
+  | Rw rw -> Goal.enter goal (fun concl ->
+    let* rw = PC.Monad.to_engine (P.elaborate rw) in
+    let* rwty = E.typecheck rw in
+    if List.length rwty.E.args < 2 then fun ctx -> raise (Error (ctx, NoRw rwty)) else
+    let args, xy = List.split_at (List.length rwty.E.args - 2) rwty.E.args in
+    let rwty = E.{ hd = rwty.hd; args } in
+    let x, y = match xy with | [x; y] -> x, y | _ -> failwith "unreachable" in
+    let* tyx = E.typecheck x in
+    (* We extract `x` from the conclusion. *)
+    let* tyg = E.typecheck concl in
+    let* f = E.pattern [x] tyg in
+    (* We find the proof. *)
+    let* hd = E.fresh_const "RwRel" in
+    let* swap_rel = E.fresh_const "swap_rel" in
+    let* impl = E.fresh_const "impl" in
+    let* u1 = EC.new_univ in
+    let* u2 = EC.new_univ in
+    let* u3 = EC.new_univ in
+    let* rwrel_evar = EC.new_evar ~ty:(Some { hd = hd.hd; args = [tyx; E.mkType u1; rwty; E.mkApp [E.mkType u2; E.mkType u3; impl] swap_rel; f; x; y] }) ~with_ctx:true in
+    let* () = fun ctx -> try synthesize_goal Goal.{ ctx = (List.map snd (IMap.to_list ctx.E.var)); goal = E.destEvar (E.of_hd rwrel_evar.hd) } ctx with E.TypeError _ -> raise (Error (ctx, NoRw rwty)) in
+    let fy = E.{ hd = f.hd; args = [y] } in
+    let** fy = E.whd ~flags:{ E.whd_flags_none with beta = true; steps = Some 1 } fy in
+    let* ry = EC.new_evar ~ty:(Some fy) ~with_ctx:true in
+    let* () = E.instantiate_evar concl (E.mkApp [rw; ry] rwrel_evar) in
+    let** subgoals = Goal.collect_goals ry in
+    EC.Monad.ret subgoals)
+  | Case r -> Goal.enter goal (fun concl ->
+    let* gty = E.typecheck concl in
+    let* tele, _ = E.destArity ~whd_rty:false ~keep_let:true ~until:(Exact 1) ~count_implicits:true gty in
+    match tele with | [] | _ :: _ :: _ -> failwith "unreachable" | [(_, ind, _, _)] ->
+    let** (_, a, c) = let+* ind = E.whd ind in E.destInd (E.of_hd ind.hd) in
+    let* atele, _ = E.destArity ~whd_rty:false ~keep_let:false ~count_implicits:true a in
+    let n = List.length atele in
+    let args, indargs = List.split_at (List.length ind.args - n) ind.args in
+    let indhd = { ind with args } in
+    let* gty = E.pattern indargs gty in
+    let tele, gty = if n = 0 then [], gty else
+      match gty.hd with | Fun (f, tele, body) -> let tele, rtele = List.split_at n tele in tele, E.mkForallOrFun f rtele body | _ -> failwith "unreachable" in
+    let** () = if Option.is_none debug then EC.Monad.iret () else
+      let+* gty = E.print gty in
+      print_endline ("gty = " ^ gty) in
+    let* tele1, gty = EC.with_telescope ~avoid_capture:false tele (E.destArity ~whd_rty:false ~keep_let:true ~until:(Exact 1) ~count_implicits:true gty) in
+    let tele = tele @ [List.hd tele1] in
+    let t = E.mkApp [E.mkFun tele gty] (E.mkCase indhd r) in
+    let** () = if Option.is_none debug then EC.Monad.iret () else
+      let+* t = E.print t in
+      print_endline ("t = " ^ t) in
+    let* ty = E.typecheck t in
+    let** () = if Option.is_none debug then EC.Monad.iret () else
+      let+* ty = E.print ~debug:true ty in
+      print_endline ("ty = " ^ ty) in
+    let* ctele, _ = E.destArity ~until:(Exact (List.length c)) ty in
+    let* c = EC.Monad.List.map (fun (i, (_, ty, _, _)) -> EC.new_evar ~ty:(Some (E.bump (- i) ty)) ~with_ctx:true) (List.mapi (fun i x -> (i, x)) ctele) in
+    let* () = E.instantiate_evar concl (E.mkApp (c @ indargs) t) in
+    let** subgoals = Goal.collect_goals concl in
+    ret subgoals)
   | Auto -> let+ _ = synthesize_goal goal in []
   | Seq [] -> ret [goal]
   | Seq (tac :: tacs) ->

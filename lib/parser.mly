@@ -7,7 +7,7 @@
 %token TYPE PROP SPROP
 %token IND PIPE MATCH REC WITH RETURN END MK
 %token PRINT CHECK DEF PROOF WHD EVAL IMPORT SET UNSET STOP
-%token EXACT REFINE APPLY INTRO CLEAR ASSUMPTION AUTO PATTERN RW
+%token EXACT REFINE APPLY INTRO REVERT CLEAR ASSUMPTION AUTO PATTERN RW CASE ELIM
 %token QED DEFINED
 %token HINT FOR
 
@@ -70,11 +70,14 @@ tac_atom:
   | REFINE; term { Tactic.Refine $2 }
   | APPLY; separated_list(COMMA, term) { Tactic.Apply $2 }
   | INTRO; list(VAR) { Tactic.Intro $2 }
+  | REVERT; nonempty_list(VAR) { match List.map (fun v -> Tactic.Revert v) $2 with | [] -> failwith "unreachable" | [t] -> t | l -> Tactic.Seq l }
   | CLEAR; list(VAR) { Tactic.Clear $2 }
   | ASSUMPTION { Tactic.Assumption }
   | AUTO { Tactic.Auto }
   | PATTERN; separated_list(COMMA, term) { Tactic.Pattern $2 }
   | RW; term { Tactic.Rw $2 }
+  | CASE { Tactic.Case false }
+  | ELIM { Tactic.Case true }
   | LPAR; tac; RPAR { $2 }
 
 type_annotation:

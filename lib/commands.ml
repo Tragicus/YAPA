@@ -126,6 +126,8 @@ let eval cmd : Serialized.t option Context.Monad.t =
       let status, g = match status with | Proofmode (v, ty, t, g :: gs) -> Proofmode (v, ty, t, gs), g | _ -> raise (Error ((ctx, status), NoGoal)) in
       (ctx, status), g in
     let* subgoals = Context.Monad.of_engine (Tactic.exec tac goal) in
+    let** debug = fun (ctx, _) -> EC.get_flag_opt "debug-tactic" ctx in
+    let () = if Option.is_none debug then () else print_endline (string_of_int (List.length subgoals) ^ " subgoals") in
     fun (ctx, status) ->
       let status = match status with | Idle -> failwith "unreachable" | Proofmode (v, ty, t, gs) ->
         let gs = List.filter (fun g -> let t = EC.get_evar_body g.Goal.goal ctx in t = None) (subgoals @ gs) in
