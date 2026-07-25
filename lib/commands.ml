@@ -113,9 +113,7 @@ let eval cmd : Serialized.t option Context.Monad.t =
     let pctx, ty = P.elaborate ty pctx in
     let pctx, t = P.elaborate t pctx in
     let* () = fun (_, status) -> (pctx.ctx, status), () in
-    let* tyb = Context.Monad.of_engine (E.typecheck t) in
-    let* b = Context.Monad.of_engine (E.unify tyb ty) in
-    if not b then fun (ctx, _) -> raise (E.TypeError (ctx, E.TypeMismatch (ty, t))) else
+    let* _ = Context.Monad.of_engine (E.typecheck ~expected:(Some ty) t) in
     let* gs = Context.Monad.of_engine (EC.Monad.to_mut (Goal.collect_goals t)) in
     let* () = fun (ctx, _) -> (if gs = [] then (let ctx, () = EC.push_const v (ty, Some t) ctx in EC.reset ctx), Idle else (ctx, Proofmode (v, ty, t, gs))), () in
     let** r = fun (ctx, _) -> 

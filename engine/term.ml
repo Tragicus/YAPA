@@ -759,9 +759,7 @@ and instantiate_evar { hd = ev; args } t =
 
   (* Checking that the instantiation is well-typed. *)
   let* ty = typecheck { hd = ev; args } in
-  let* tty = typecheck t in
-  let* b = unify ty tty in
-  if not b then fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, t))) else
+  let* _ = typecheck ~expected:(Some ty) t in
 
   let* map =
     Context_.Monad.List.fold_left (fun (i, arg) map ->
@@ -1030,7 +1028,7 @@ and safe_dest_type t =
     with _ -> fun ctx -> raise (TypeError (ctx, NotAType t)))
   | _ -> fun ctx -> raise (TypeError (ctx, NotAType t))
 
-and typecheck t =
+and typecheck ?(check=true) ?(expected=None) t =
   let** _ = fun ctx -> assert (List.for_all (fun (_, (_, k, _)) -> 0 <= k) (IMap.to_list ctx.univ.levels)) in
   let timestamp = timestamp () in let _ = timestamp in
   let** debug = Context_.get_flag_opt "debug-unification" in
@@ -1047,41 +1045,40 @@ and typecheck t =
       ret ty
     | Type (s, u) -> ret (of_hd (Type (s, Kernel.Univ.Level.succ u)))
     | Fun (false, tele, body) ->
-      Context_.fold_telescope (fun tele (v, ty, t, impl) ->
-        let* tty = typecheck ty in
+      if not check then
+        let+ body = Context_.with_telescope ~avoid_capture:false tele (typecheck ~check body) in
+        mkForall tele body else
+      Context_.fold_telescope ~avoid_capture:false (fun () (_, ty, t, _) ->
+        let* tty = typecheck ~check ty in
         let* _ = safe_dest_type tty in
-        match t with
-        | None -> ret ((v, ty, t, impl) :: tele)
-        | Some t ->
-          let* ty' = typecheck t in
-          let* b = unify ~cumulative:Cumul ty' ty in
-          if b then ret ((v, ty, Some t, impl) :: tele) else fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, t))) 
-      ) [] tele (fun tele ->
-        let+ ty = typecheck body in
-        mkForall (List.rev tele) ty
+        let+ _ = Context_.Monad.Option.map (typecheck ~check ~expected:(Some ty)) t in
+        ()
+      ) () tele (fun () ->
+        let+ ty = typecheck ~check body in
+        mkForall tele ty
       )
     | Fun (true, tele, body) ->
       Context_.fold_telescope (fun u (_, ty, t, _) ->
-        let* v = typecheck ty in
         match t with
         | None ->
-          let** v = whd v in
+          let* v = typecheck ~check ty in
           let+ (_, v) = safe_dest_type v in
           Kernel.Univ.Level.max u v
+        | Some _ when not check -> ret u
         | Some t ->
-          let* ty' = typecheck t in
-          let* b = unify ~cumulative:Cumul ty' ty in
-          if b then ret u else fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, t))) 
+          let* v = typecheck ~check ty in
+          let* _ = safe_dest_type v in
+          let+ _ = typecheck ~check ~expected:(Some ty) t in
+          u
       ) Kernel.Univ.Level.base tele (fun u ->
         let* ty = typecheck body in
-        let** ty = whd ty in
         let+ (s, v) = safe_dest_type ty in
         of_hd (Type (s, Kernel.Univ.Level.max u v))
       )
     | Ind (v, a, c) ->
+      if not check then ret a else
       (* Check the arity *)
-      let* tya = typecheck a in
-      let** tya = whd tya in
+      let* tya = typecheck ~check a in
       let* _ = safe_dest_type tya in
       (* Push the type of the inductive on the context *)
       Context_.with_var ~avoid_capture:false (v, a, None, false) (
@@ -1111,8 +1108,7 @@ and typecheck t =
         | _ -> let+* b = occurs (of_hd (Var depth)) t in if b then raise Not_found else false in
       let* () = List.fold_left (fun state c ->
         let* () = state in
-        let* tyc = typecheck c in
-        let** tyc = whd tyc in
+        let* tyc = typecheck ~check c in
         let* _ = safe_dest_type tyc in
         let** b = fun ctx -> try check_positivity c ctx with Not_found -> raise (TypeError (ctx, NonPositive c)) in
         if b then ret ()
@@ -1120,7 +1116,7 @@ and typecheck t =
       ret a)
     | Construct (ind, i) ->
       (* Check ind is well-typed *)
-      let* _ = typecheck ind in
+      let* _ = if check then typecheck ind else ret (mkVar 0) in
       let** ind' = whd ind in
       let ind' = of_hd (ind'.hd) in
       let** _, _, c = fun ctx -> try destInd ind' with _ -> raise (TypeError (ctx, IllFormed t)) in
@@ -1129,16 +1125,18 @@ and typecheck t =
       ret (beta ind' (List.nth c i))
     | Case (ind', recursive) ->
       (* Check ind is well-typed *)
-      let* _ = typecheck ind' in
+      let* _ = if check then typecheck ind' else ret (mkVar 0) in
       (* Get ind's content *)
       let** ind = whd ind' in
       let** (v, a, c) = fun ctx -> try destInd ind with _ -> raise (TypeError (ctx, IllFormed t)) in
       (* Get a's arity *)
       let* atele, asort = destArity a in
-      let* asort = safe_dest_type asort in
-      let na = List.length atele in
       let* runiv = Context_.new_univ in
-      let* () = Context_.add_univ_constraint runiv asort in
+      let* () = 
+        if not check then ret () else
+        let* asort = safe_dest_type asort in
+        Context_.add_univ_constraint runiv asort in
+      let na = List.length atele in
       (* Build the predicate that gives the return type of the match... *)
       let rty = mkForall (atele @ [("_", mkApp (List.init na (fun i -> of_hd (Var (na-i-1)))) (bump na ind'), None, false)]) (of_hd (Type runiv)) in
       (* Start building the result's telescope, in reverse order *)
@@ -1184,13 +1182,13 @@ and typecheck t =
 
   let* _, ty = fun ctx ->
     try fold_left_args_with_type t.args ty (fun arg ty () ->
-      let* tyarg = typecheck arg in
-      let* b = unify ~cumulative:Cumul tyarg ty in
-      if b then ret (arg, ()) else fun ctx -> raise (TypeError (ctx, TypeMismatch (ty, arg)))
+      let+ _ = typecheck ~check ~expected:(if check then Some ty else None) arg in
+      (arg, ())
     ) () ctx
     with TypeError (ctx, IllegalApplication _) -> raise (TypeError (ctx, IllegalApplication t)) in
   let** () = if Option.is_some debug then let+* ty = print ty in print_endline (timestamp ^ ": type is " ^ ty) else Context_.Monad.iret () in
-  ret ty
+  let* b = Option.map_or (ret true) (unify ~cumulative:Cumul ty) expected in
+  if b then ret ty else fun ctx -> raise (TypeError (ctx, IllegalApplication t))
 
 (* For each occurrence of a problematic term in `t` (according to `pb`), performs as many beta-reductions, evar delta-reductions and evar instantiations as needed in the context surrounding the problematic term to make the latter disappear.
   This is used for instance to clear variables from the context, removing the occurrences of said variables from the term.
